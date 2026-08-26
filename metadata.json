@@ -1,0 +1,8 @@
+{
+  "name": "QuantAutonoma - Autonomous Trading System",
+  "description": "A fully autonomous algorithmic trading system that discovers assets, backtests strategies, and executes paper trading using real-time simulated market data.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
