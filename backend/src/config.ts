@@ -11,8 +11,6 @@ const envSchema = z.object({
   INTEGRATION_MASTER_KEY: z.string().default(''),
   LOCAL_VAULT_KEY_PATH: z.string().default('./data/.integration-vault-key'),
 
-  // Legacy server-level credentials are kept only as migration fallback.
-  // New credentials should be stored per workspace through /api/integrations.
   BINANCE_API_KEY: z.string().default(''),
   BINANCE_API_SECRET: z.string().default(''),
   BINANCE_BASE_URL: z.string().url().default('https://fapi.binance.com'),
@@ -35,6 +33,7 @@ const envSchema = z.object({
   FOREX_MAX_ENTRIES_PER_SYMBOL: z.coerce.number().int().min(0).max(50).default(0),
   FOREX_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
   FOREX_MIN_WINRATE: z.coerce.number().min(0).max(100).default(70),
+  FOREX_MAX_SPREAD_POINTS: z.coerce.number().min(0).max(100000).default(30),
 
   DAILY_LOSS_LIMIT_PCT: z.coerce.number().positive().max(100).default(5),
   MAX_DRAWDOWN_PCT: z.coerce.number().positive().max(100).default(15),
@@ -50,6 +49,7 @@ export function defaultSettings(): EngineSettings {
     riskKillSwitchEnabled: true,
     dailyLossLimitPct: env.DAILY_LOSS_LIMIT_PCT,
     maxDrawdownPct: env.MAX_DRAWDOWN_PCT,
+    emergencyStopMode: 'PAUSE_ONLY',
 
     cryptoEnabled: true,
     maxConcurrentCryptoTrades: env.CRYPTO_MAX_TRADES,
@@ -70,5 +70,6 @@ export function defaultSettings(): EngineSettings {
     forexMinRollingWinRate: env.FOREX_MIN_WINRATE,
     forexMagicNumber: 340034,
     forexMaxDeviationPoints: 20,
+    forexMaxSpreadPoints: env.FOREX_MAX_SPREAD_POINTS,
   };
 }
