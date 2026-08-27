@@ -81,6 +81,10 @@ export interface EngineSettings {
   appMode: 'PAPER' | 'TESTNET' | 'REAL';
   engineEnabled: boolean;
 
+  riskKillSwitchEnabled: boolean;
+  dailyLossLimitPct: number;
+  maxDrawdownPct: number;
+
   cryptoEnabled: boolean;
   maxConcurrentCryptoTrades: number;
   cryptoMarginPctPerTrade: number;
@@ -91,10 +95,13 @@ export interface EngineSettings {
   cryptoMinRollingWinRate: number;
 
   forexEnabled: boolean;
+  forexSymbols: string[];
   maxConcurrentForexTrades: number;
   forexMaxEntriesPerSymbol: number;
   forexRiskMode: 'MARGIN_PERCENT' | 'RISK_TO_SL';
   forexPctPerTrade: number;
+  forexMinSignalConfidence: number;
+  forexMinRollingWinRate: number;
   forexMagicNumber: number;
   forexMaxDeviationPoints: number;
 }
