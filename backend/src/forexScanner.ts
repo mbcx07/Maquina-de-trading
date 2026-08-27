@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { analyzeStructureStrategy, opportunityScore, runRollingBacktest } from './analysis.js';
+import { opportunityScore } from './analysis.js';
+import { analyzeStructureStrategyV335, runRollingBacktestV335 } from './analysisV335.js';
 import { TradingDatabase } from './database.js';
 import { ForexDataClient } from './forexData.js';
 import { TradingRepository } from './repositories.js';
@@ -47,6 +48,10 @@ export class ForexMarketScanner {
       this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
       return;
     }
+    if (!this.telegram.isConfigured()) {
+      this.saveState({ status: 'WAITING_TELEGRAM', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
+      return;
+    }
 
     this.running = true;
     const symbols = [...new Set(settings.forexSymbols.map((symbol) => normalizeDisplaySymbol(symbol)).filter(Boolean))];
@@ -64,18 +69,11 @@ export class ForexMarketScanner {
         const symbol = symbols[index];
         try {
           const signal = await this.scanSymbol(symbol);
+          this.clearSymbolError(symbol);
           if (signal) freshSignals.push(signal);
         } catch (error) {
           errors++;
-          this.database.db.prepare(`
-            INSERT INTO engine_state(key, value, updated_at)
-            VALUES(?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-          `).run(
-            `forexScannerError:${symbol}`,
-            JSON.stringify({ error: error instanceof Error ? error.message : String(error), at: Date.now() }),
-            Date.now(),
-          );
+          this.saveSymbolError(symbol, error);
         }
 
         this.saveState({
@@ -111,9 +109,11 @@ export class ForexMarketScanner {
       }
 
       this.saveState({
-        status: 'IDLE', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+        status: errors === symbols.length && symbols.length > 0 ? 'DATA_ERROR' : 'IDLE',
+        mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
         startedAt, completedAt: Date.now(), total: symbols.length, scanned: symbols.length,
         signals: freshSignals.length, qualified: qualified.length, sent, errors,
+        diagnostic: freshSignals.length === 0 && errors === 0 ? 'NO_VALID_SETUP_NOW' : undefined,
         usage: this.market.getUsage(),
         nextScanMinutes: settings.forexSignalScanIntervalMinutes,
       });
@@ -143,9 +143,9 @@ export class ForexMarketScanner {
 
   private async scanSymbol(symbol: string): Promise<Opportunity | null> {
     const { ltf, htf } = await this.market.dualRates(symbol);
-    if (ltf.length < 80 || htf.length < 200) return null;
+    if (ltf.length < 80 || htf.length < 200) throw new Error(`FOREX_INSUFFICIENT_CANDLES:${symbol}:ltf=${ltf.length}:htf=${htf.length}`);
 
-    const signal = analyzeStructureStrategy(ltf, htf, symbol);
+    const signal = analyzeStructureStrategyV335(ltf, htf, symbol);
     if (!signal) {
       this.signalZoneActive.set(symbol, false);
       return null;
@@ -154,8 +154,8 @@ export class ForexMarketScanner {
     if (this.signalZoneActive.get(symbol) === true) return null;
     this.signalZoneActive.set(symbol, true);
 
-    const backtest = runRollingBacktest(symbol, ltf, htf);
-    const rollingWinRate = backtest.tradesEvaluated >= 3 ? backtest.winRate : signal.confidence;
+    const backtest = runRollingBacktestV335(symbol, ltf, htf);
+    const rollingWinRate = backtest.tradesEvaluated === 0 ? signal.confidence : backtest.winRate;
     const score = opportunityScore(signal, backtest, 60);
     const candleTime = ltf.at(-1)?.time ?? Date.now();
     const fingerprint = sha256([
@@ -188,7 +188,7 @@ export class ForexMarketScanner {
         reason: signal.reason,
         atr: signal.atr,
         backtest,
-        rollingWinRateSource: backtest.tradesEvaluated >= 3 ? 'ROLLING_BACKTEST' : 'SIGNAL_CONFIDENCE_FALLBACK',
+        rollingWinRateSource: backtest.tradesEvaluated === 0 ? 'SIGNAL_CONFIDENCE_NO_BACKTEST_TRADES' : 'ROLLING_BACKTEST',
         candleTime,
       },
     };
@@ -213,6 +213,22 @@ export class ForexMarketScanner {
       error ?? null,
       Date.now(),
     );
+  }
+
+  private saveSymbolError(symbol: string, error: unknown): void {
+    this.database.db.prepare(`
+      INSERT INTO engine_state(key, value, updated_at)
+      VALUES(?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+    `).run(
+      `forexScannerError:${symbol}`,
+      JSON.stringify({ symbol, error: error instanceof Error ? error.message : String(error), at: Date.now() }),
+      Date.now(),
+    );
+  }
+
+  private clearSymbolError(symbol: string): void {
+    this.database.db.prepare(`DELETE FROM engine_state WHERE key = ?`).run(`forexScannerError:${symbol}`);
   }
 
   private saveState(value: Record<string, unknown>): void {
