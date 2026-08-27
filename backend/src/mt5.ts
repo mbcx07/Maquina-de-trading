@@ -1,5 +1,6 @@
 import { env } from './config.js';
 import type { Candle } from './analysis.js';
+import type { Mt5BridgeCredentials } from './integrationVault.js';
 import type { EngineSettings, TradeSide } from './types.js';
 
 export interface Mt5Account {
@@ -87,14 +88,26 @@ export interface Mt5SizeResult {
 }
 
 export class Mt5BridgeClient {
-  constructor(private readonly getSettings: () => EngineSettings) {}
+  constructor(
+    private readonly getSettings: () => EngineSettings,
+    private readonly credentialProvider?: () => Mt5BridgeCredentials | null,
+  ) {}
+
+  private connection(): Mt5BridgeCredentials {
+    const configured = this.credentialProvider?.();
+    const bridgeUrl = String(configured?.bridgeUrl || env.MT5_BRIDGE_URL || '').trim().replace(/\/$/, '');
+    const bridgeToken = String(configured?.bridgeToken || env.MT5_BRIDGE_TOKEN || '').trim();
+    if (!bridgeUrl) throw new Error('MT5_BRIDGE_NOT_CONFIGURED');
+    return { bridgeUrl, bridgeToken };
+  }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${env.MT5_BRIDGE_URL}${path}`, {
+    const { bridgeUrl, bridgeToken } = this.connection();
+    const response = await fetch(`${bridgeUrl}${path}`, {
       ...init,
       headers: {
         'Content-Type': 'application/json',
-        ...(env.MT5_BRIDGE_TOKEN ? { 'X-Bridge-Token': env.MT5_BRIDGE_TOKEN } : {}),
+        ...(bridgeToken ? { 'X-Bridge-Token': bridgeToken } : {}),
         ...(init?.headers ?? {}),
       },
     });
