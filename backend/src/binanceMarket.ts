@@ -101,7 +101,10 @@ export class BinanceMarketDataClient {
       calls++;
       if (calls > 500) throw new Error('BINANCE_HISTORY_PAGINATION_GUARD');
       if (rows.length < 1500) break;
-      await sleep(80);
+      // A 14-day all-symbol audit is intentionally paced. USD-M Futures currently
+      // publishes a 2400 REQUEST_WEIGHT/minute ceiling; keeping pagination serial and
+      // throttled avoids starving execution/reconciliation traffic on the same VPS.
+      await sleep(180);
     }
 
     return dedupeCandles(output);
@@ -117,7 +120,6 @@ export class BinanceMarketDataClient {
   }
 
   async getDualHistoricalRange(symbol: string, startTime: number, endTime: number): Promise<{ ltf: Candle[]; htf: Candle[] }> {
-    // Exact historical warm-up for a rolling 100xM1 / 210xM15 v33.5 decision window.
     const warmupStart = startTime - 15 * 60_000 * 210;
     const [ltf, htf] = await Promise.all([
       this.getKlinesRange(symbol, '1m', Math.max(0, warmupStart), endTime),
