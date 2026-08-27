@@ -1,243 +1,113 @@
-
-import CryptoJS from 'crypto-js';
-
 export interface BinanceResponse {
   success: boolean;
   data?: any;
   error?: any;
 }
 
+/**
+ * V34 SECURITY BOUNDARY
+ * ---------------------
+ * This legacy frontend service is retained only so old analysis modules can
+ * compile while the scanner is migrated to the backend. It contains NO API
+ * key/secret and MUST NOT execute authenticated account or trade operations.
+ *
+ * All signed Binance activity belongs in backend/src/binance.ts.
+ */
 export class BinanceService {
   public restBase = 'https://fapi.binance.com';
-  private apiKey = "iZi4935R3BaYaV9nWYRgdF7PFGTv8wVB2EwwoIQD4Bm0XGirFNhVTbxv7YTbiyRN";
-  private apiSecret = "xWhQuqLClorGXFY8BcEbwAs8owbLfO3BEoXuKnE1zl1IRtQMP7WcO6UHSgqIq0yU";
-  
-  public isReady: boolean = false;
-  public lastNetworkError: string = "";
-  public activeProxyName: string = "APEX_INIT";
-  private timeOffset: number = 0;
+  public isReady = false;
+  public lastNetworkError = '';
+  public activeProxyName = 'PUBLIC-MARKET-DATA';
   private symbolInfo: Map<string, any> = new Map();
-  private lastSyncTime = 0;
 
   constructor() {
-    this.init();
-  }
-
-  private async init() {
-    try {
-      await this.syncTime();
-      await this.fetchExchangeInfo();
-      setInterval(() => {
-        if (!this.isReady || Date.now() - this.lastSyncTime > 25000) {
-          this.syncTime().catch(() => {});
-        }
-      }, 15000);
-    } catch(e: any) {
-      this.lastNetworkError = e.message;
-    }
+    void this.fetchExchangeInfo();
   }
 
   public async robustFetch(url: string, options: RequestInit = {}): Promise<any> {
-    const isMutation = options.method === 'POST' || options.method === 'DELETE';
-    
-    const tunnels = [
-      { name: 'NEXUS-V33', fn: (u: string) => `https://corsproxy.io/?${encodeURIComponent(u)}`, weight: 10 },
-      { name: 'HYPER-NODE', fn: (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`, weight: 8 },
-      { name: 'DIRECT-BRIDGE', fn: (u: string) => u, weight: 5 }
-    ];
-
-    let lastError = "";
-
-    for (const tunnel of tunnels) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), isMutation ? 20000 : 10000);
-
-        const res = await fetch(tunnel.fn(url), {
-          ...options,
-          signal: controller.signal,
-          headers: { 
-            'X-MBX-APIKEY': this.apiKey,
-            ...(isMutation ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {})
-          }
-        });
-
-        clearTimeout(timeout);
-        const text = await res.text();
-
-        if (res.ok) {
-          let data;
-          try { data = JSON.parse(text); } catch { data = text; }
-          
-          if (data && data.code && data.code < 0) {
-            if (data.code === -1021) { await this.syncTime(); continue; }
-            throw new Error(`[BNC ${data.code}] ${data.msg}`);
-          }
-
-          this.activeProxyName = tunnel.name;
-          this.isReady = true;
-          return data;
-        }
-        lastError = `${tunnel.name}: ${res.status} ${text.substring(0, 50)}`;
-      } catch (e: any) {
-        lastError = `${tunnel.name}: ${e.message}`;
-      }
+    const method = String(options.method || 'GET').toUpperCase();
+    if (method !== 'GET') {
+      throw new Error('V34_FRONTEND_MUTATIONS_DISABLED');
     }
-    throw new Error(lastError);
+
+    const parsed = new URL(url);
+    if (parsed.origin !== 'https://fapi.binance.com') {
+      throw new Error('V34_FRONTEND_ONLY_BINANCE_PUBLIC_DATA');
+    }
+
+    const response = await fetch(url, { method: 'GET' });
+    if (!response.ok) throw new Error(`BINANCE_PUBLIC_HTTP_${response.status}`);
+    const data = await response.json();
+    this.isReady = true;
+    return data;
   }
 
-  public async syncTime() {
-    try {
-      const data = await this.robustFetch(`${this.restBase}/fapi/v1/time`);
-      if (data?.serverTime) { 
-        this.timeOffset = data.serverTime - Date.now(); 
-        this.isReady = true; 
-        this.lastSyncTime = Date.now();
-      }
-    } catch (e: any) {}
+  public async syncTime(): Promise<void> {
+    await this.robustFetch(`${this.restBase}/fapi/v1/time`);
   }
 
-  public async fetchExchangeInfo() {
+  public async fetchExchangeInfo(): Promise<void> {
     try {
       const data = await this.robustFetch(`${this.restBase}/fapi/v1/exchangeInfo`);
-      if (data?.symbols) {
-        this.symbolInfo.clear();
-        data.symbols.forEach((s: any) => {
-          if (s.contractType === 'PERPETUAL' && s.status === 'TRADING' && s.quoteAsset === 'USDT') {
-            this.symbolInfo.set(s.symbol, s);
-          }
-        });
+      this.symbolInfo.clear();
+      for (const symbol of data?.symbols || []) {
+        if (symbol.contractType === 'PERPETUAL' && symbol.status === 'TRADING' && symbol.quoteAsset === 'USDT') {
+          this.symbolInfo.set(symbol.symbol, symbol);
+        }
       }
-    } catch (e) {}
-  }
-
-  public async getLeverageBrackets(symbol: string): Promise<number> {
-    const res = await this.signedRequest('/fapi/v1/leverageBracket', 'GET', { symbol });
-    if (res.success && Array.isArray(res.data)) {
-        const brackets = res.data[0]?.brackets || [];
-        return Math.max(...brackets.map((b: any) => b.initialLeverage));
+    } catch (error: any) {
+      this.lastNetworkError = error?.message || String(error);
     }
-    return 20; // Fallback seguro
-  }
-
-  public async setLeverage(symbol: string, leverage: number): Promise<number> {
-    try {
-      // Intentar primero cambiar a CROSSED (Isolated suele dar más problemas de límites)
-      await this.signedRequest('/fapi/v1/marginType', 'POST', { symbol, marginType: 'CROSSED' });
-    } catch(e) {}
-
-    // Obtener el máximo permitido real por Binance para este par
-    const maxAllowed = await this.getLeverageBrackets(symbol);
-    const finalLeverage = Math.min(leverage, maxAllowed);
-
-    const res = await this.signedRequest('/fapi/v1/leverage', 'POST', { 
-      symbol, 
-      leverage: finalLeverage.toString() 
-    });
-
-    if (res.success && res.data?.leverage) {
-        return parseInt(res.data.leverage);
-    }
-    return finalLeverage;
-  }
-
-  public async getOpenPositions(): Promise<any[]> {
-    const res = await this.signedRequest('/fapi/v2/positionRisk', 'GET');
-    return (res.success && Array.isArray(res.data)) 
-        ? res.data.filter((p: any) => Math.abs(parseFloat(p.positionAmt)) > 0) 
-        : [];
-  }
-
-  public async getAvailableBalance(): Promise<number> {
-    const res = await this.signedRequest('/fapi/v2/account', 'GET');
-    if (res.success && res.data) {
-      const usdt = res.data.assets?.find((a: any) => a.asset === 'USDT');
-      return parseFloat(usdt?.availableBalance || "0");
-    }
-    return 0;
   }
 
   public async getAllPrices(): Promise<Map<string, number>> {
-    const pricesMap = new Map<string, number>();
-    try {
-      const data = await this.robustFetch(`${this.restBase}/fapi/v1/ticker/price`);
-      if (Array.isArray(data)) {
-        data.forEach((item: any) => {
-          if (item.symbol.endsWith('USDT')) pricesMap.set(item.symbol, parseFloat(item.price));
-        });
+    const map = new Map<string, number>();
+    const data = await this.robustFetch(`${this.restBase}/fapi/v1/ticker/price`);
+    if (Array.isArray(data)) {
+      for (const item of data) {
+        if (item.symbol?.endsWith('USDT')) map.set(item.symbol, Number(item.price));
       }
-    } catch (e) {}
-    return pricesMap;
+    }
+    return map;
   }
 
   public async getTicker24h(): Promise<any[]> {
-    try {
-      const data = await this.robustFetch(`${this.restBase}/fapi/v1/ticker/24hr`);
-      return Array.isArray(data) ? data : [];
-    } catch (e) { return []; }
-  }
-
-  public async closePosition(symbol: string, side: 'BUY' | 'SELL', amount: string): Promise<BinanceResponse> {
-    const closeSide = side === 'BUY' ? 'SELL' : 'BUY';
-    await this.signedRequest('/fapi/v1/allOpenOrders', 'DELETE', { symbol });
-    return this.signedRequest('/fapi/v1/order', 'POST', {
-      symbol, side: closeSide, type: 'MARKET', quantity: Math.abs(parseFloat(amount)).toString(), reduceOnly: 'true'
-    });
-  }
-
-  public async createOrder(symbol: string, side: 'BUY' | 'SELL', quantity: string): Promise<BinanceResponse> {
-    return this.signedRequest('/fapi/v1/order', 'POST', { 
-      symbol, side, type: 'MARKET', quantity, newOrderRespType: 'RESULT' 
-    });
-  }
-
-  public async setNativeExit(symbol: string, side: 'BUY' | 'SELL', price: number, type: 'STOP_MARKET' | 'TAKE_PROFIT_MARKET'): Promise<BinanceResponse> {
-    return this.signedRequest('/fapi/v1/order', 'POST', {
-      symbol, side, type, stopPrice: this.formatPrice(symbol, price),
-      closePosition: 'true', workingType: 'MARK_PRICE', timeInForce: 'GTC'
-    });
+    const data = await this.robustFetch(`${this.restBase}/fapi/v1/ticker/24hr`);
+    return Array.isArray(data) ? data : [];
   }
 
   public formatQuantity(symbol: string, quantity: number): string {
     const info = this.symbolInfo.get(symbol);
     if (!info) return quantity.toFixed(3);
-    const stepSize = parseFloat(info.filters?.find((f: any) => f.filterType === 'LOT_SIZE')?.stepSize || "0.001");
-    const precision = Math.max(0, Math.round(-Math.log10(stepSize)));
-    return (Math.floor(quantity / stepSize) * stepSize).toFixed(precision);
+    const filter = info.filters?.find((f: any) => f.filterType === 'MARKET_LOT_SIZE')
+      ?? info.filters?.find((f: any) => f.filterType === 'LOT_SIZE');
+    const step = Number(filter?.stepSize || 0.001);
+    const precision = Math.max(0, Math.round(-Math.log10(step)));
+    return (Math.floor(quantity / step) * step).toFixed(precision);
   }
 
   public formatPrice(symbol: string, price: number): string {
     const info = this.symbolInfo.get(symbol);
     if (!info) return price.toFixed(4);
-    const tickSize = parseFloat(info.filters?.find((f: any) => f.filterType === 'PRICE_FILTER')?.tickSize || "0.0001");
-    const precision = Math.max(0, Math.round(-Math.log10(tickSize)));
-    return (Math.round(price / tickSize) * tickSize).toFixed(precision);
+    const filter = info.filters?.find((f: any) => f.filterType === 'PRICE_FILTER');
+    const tick = Number(filter?.tickSize || 0.0001);
+    const precision = Math.max(0, Math.round(-Math.log10(tick)));
+    return (Math.round(price / tick) * tick).toFixed(precision);
   }
 
-  public async getUserTrades(symbol: string): Promise<any[]> {
-    const res = await this.signedRequest('/fapi/v1/userTrades', 'GET', { symbol, limit: '5' });
-    return res.success && Array.isArray(res.data) ? res.data : [];
+  private disabled(): never {
+    throw new Error('V34_FRONTEND_EXECUTION_DISABLED_USE_BACKEND');
   }
 
-  public async signedRequest(endpoint: string, method: 'GET' | 'POST' | 'DELETE', params: any = {}): Promise<BinanceResponse> {
-    try {
-      const timestamp = Date.now() + this.timeOffset;
-      const queryObj: any = { ...params, timestamp: timestamp.toString(), recvWindow: '60000' };
-      const queryString = Object.keys(queryObj).sort().map(k => `${k}=${encodeURIComponent(queryObj[k])}`).join('&');
-      const signature = CryptoJS.HmacSHA256(queryString, this.apiSecret).toString(CryptoJS.enc.Hex);
-      
-      const url = `${this.restBase}${endpoint}`;
-      const ghostQuery = `${queryString}&signature=${signature}`;
-
-      const res = await this.robustFetch(method === 'GET' ? `${url}?${ghostQuery}` : url, {
-        method,
-        body: method === 'GET' ? null : ghostQuery
-      });
-      return { success: true, data: res };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
+  public async getLeverageBrackets(_symbol: string): Promise<number> { return this.disabled(); }
+  public async setLeverage(_symbol: string, _leverage: number): Promise<number> { return this.disabled(); }
+  public async getOpenPositions(): Promise<any[]> { return this.disabled(); }
+  public async getAvailableBalance(): Promise<number> { return this.disabled(); }
+  public async getUserTrades(_symbol: string): Promise<any[]> { return this.disabled(); }
+  public async closePosition(_symbol: string, _side: 'BUY' | 'SELL', _amount: string): Promise<BinanceResponse> { return this.disabled(); }
+  public async createOrder(_symbol: string, _side: 'BUY' | 'SELL', _quantity: string): Promise<BinanceResponse> { return this.disabled(); }
+  public async setNativeExit(_symbol: string, _side: 'BUY' | 'SELL', _price: number, _type: 'STOP_MARKET' | 'TAKE_PROFIT_MARKET'): Promise<BinanceResponse> { return this.disabled(); }
+  public async signedRequest(_endpoint: string, _method: 'GET' | 'POST' | 'DELETE', _params: any = {}): Promise<BinanceResponse> { return this.disabled(); }
 }
 
 export const binanceService = new BinanceService();
