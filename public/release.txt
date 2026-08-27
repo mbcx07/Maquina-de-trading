@@ -1,4 +1,4 @@
 QUANTUM DUAL V34 LINUX
-Release: 2026.08.27-R4
+Release: 2026.08.27-R5
 Branch: feature/v34-dual-market-engine
-Includes: original V33.5 100xM1/210xM15 windows, PAPER anti-microclose, Binance profitable-only universe audit, Binance 418/429 cooldown + safe audit pacing, Forex analysis independent of Telegram, no-cache frontend shell.
+Includes: original V33.5 100xM1/210xM15 windows, PAPER anti-microclose, Binance profitable-only universe audit, Binance 418/429 cooldown + safe audit pacing, Crypto OFF prevents automatic universe audit startup, Forex analysis independent of Telegram, no-cache frontend shell.
