@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { analyzeStructureStrategyV335, runRollingBacktestV335 } from './analysisV335.js';
 import { BinanceMarketDataClient } from './binanceMarket.js';
 import { TradingDatabase } from './database.js';
+import { normalizeFuturesExitLevels } from './futuresExitProfile.js';
 import { OpportunityOrchestrator } from './orchestrator.js';
 import { UniverseQualificationService } from './universeQualification.js';
 import type { EngineSettings, Opportunity } from './types.js';
@@ -18,14 +19,12 @@ export class CryptoMarketScanner {
     private readonly orchestrator: OpportunityOrchestrator,
     private readonly getSettings: () => EngineSettings,
   ) {
-    this.qualification = new UniverseQualificationService(database, market);
+    this.qualification = new UniverseQualificationService(database, market, getSettings);
   }
 
   start(): void {
     this.stopped = false;
-    if (this.getSettings().cryptoEnabled && this.qualification.shouldRefresh(7)) {
-      this.qualification.runInBackground(14);
-    }
+    if (this.getSettings().cryptoEnabled && this.qualification.shouldRefresh(7)) this.qualification.runInBackground(14);
     void this.loop();
   }
 
@@ -37,17 +36,14 @@ export class CryptoMarketScanner {
 
   async runCycle(): Promise<void> {
     if (this.running) return;
-    if (!this.getSettings().cryptoEnabled) {
-      this.saveState({ status: 'DISABLED', strategy: 'V33.5_ORIGINAL_COMPAT', completedAt: Date.now() });
-      return;
-    }
+    if (!this.getSettings().cryptoEnabled) return;
 
     if (this.qualification.shouldRefresh(7)) this.qualification.runInBackground(14);
     const audit = this.qualification.getState();
     if (audit.status !== 'COMPLETED') {
       this.saveState({
         status: 'WAITING_UNIVERSE_AUDIT',
-        strategy: 'V33.5_ORIGINAL_COMPAT',
+        strategy: 'V33.5_ORIGINAL_COMPAT_FUTURES',
         auditStatus: audit.status,
         startedAt: audit.startedAt,
         completedAt: audit.completedAt,
@@ -65,7 +61,7 @@ export class CryptoMarketScanner {
     if (qualified.size === 0) {
       this.saveState({
         status: 'NO_QUALIFIED_SYMBOLS',
-        strategy: 'V33.5_ORIGINAL_COMPAT',
+        strategy: 'V33.5_ORIGINAL_COMPAT_FUTURES',
         auditCompletedAt: audit.completedAt,
         qualifiedUniverse: 0,
         completedAt: Date.now(),
@@ -93,7 +89,7 @@ export class CryptoMarketScanner {
       const liquidity = liquidityPercentiles(symbols, tickerMap);
 
       this.saveState({
-        status: 'SCANNING', strategy: 'V33.5_ORIGINAL_COMPAT', qualification: 'PROFITABLE_ONLY',
+        status: 'SCANNING', strategy: 'V33.5_ORIGINAL_COMPAT_FUTURES', qualification: 'PROFITABLE_ONLY',
         startedAt, total: symbols.length, universeTotal: allSymbols.length, liquidUniverse: liquidSymbols.length,
         qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified], minQuoteVolume24h: 2_000_000,
         scanned: 0, opportunities: 0, revalidated: 0, errors: 0,
@@ -114,7 +110,7 @@ export class CryptoMarketScanner {
         }
 
         this.saveState({
-          status: 'SCANNING', strategy: 'V33.5_ORIGINAL_COMPAT', qualification: 'PROFITABLE_ONLY',
+          status: 'SCANNING', strategy: 'V33.5_ORIGINAL_COMPAT_FUTURES', qualification: 'PROFITABLE_ONLY',
           startedAt, total: symbols.length, universeTotal: allSymbols.length, liquidUniverse: liquidSymbols.length,
           qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified], scanned,
           current: chunk.at(-1) ?? null, opportunities: opportunities.length, revalidated: 0, errors,
@@ -125,8 +121,7 @@ export class CryptoMarketScanner {
 
       // The full-market scan can take long enough for an M1 setup to become stale.
       // Preserve ranking, but re-run the exact v33.5 signal on fresh 100xM1/210xM15
-      // immediately before handing a candidate to execution. A setup that has left
-      // its pullback/trend zone simply disappears instead of opening and micro-closing.
+      // immediately before handing a candidate to execution.
       const revalidationPool = [...opportunities]
         .sort((a, b) => b.score - a.score || b.confidence - a.confidence)
         .slice(0, Math.max(20, Math.min(40, this.getSettings().maxConcurrentCryptoTrades * 4)));
@@ -150,7 +145,7 @@ export class CryptoMarketScanner {
 
       const result = await this.orchestrator.process(freshOpportunities, true);
       this.saveState({
-        status: 'IDLE', strategy: 'V33.5_ORIGINAL_COMPAT', qualification: 'PROFITABLE_ONLY',
+        status: 'IDLE', strategy: 'V33.5_ORIGINAL_COMPAT_FUTURES', qualification: 'PROFITABLE_ONLY',
         startedAt, completedAt: Date.now(), total: symbols.length, universeTotal: allSymbols.length,
         liquidUniverse: liquidSymbols.length, qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified],
         scanned, opportunities: opportunities.length, revalidated: freshOpportunities.length,
@@ -161,7 +156,7 @@ export class CryptoMarketScanner {
       });
     } catch (error) {
       this.saveState({
-        status: 'ERROR', strategy: 'V33.5_ORIGINAL_COMPAT', startedAt, completedAt: Date.now(),
+        status: 'ERROR', strategy: 'V33.5_ORIGINAL_COMPAT_FUTURES', startedAt, completedAt: Date.now(),
         scanned, opportunities: opportunities.length, errors: errors + 1,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -196,14 +191,29 @@ export class CryptoMarketScanner {
       : backtest.winRate >= settings.cryptoMinRollingWinRate && signal.confidence >= settings.cryptoMinSignalConfidence;
     if (!passesOriginalFilter) return null;
 
+    // V33.5 identifies the setup/structure. Crypto Futures then applies a minimum
+    // UNDERLYING price distance so leverage is reflected as margin ROI rather than
+    // accidentally turning M1 structure into a micro-scalp.
+    const exits = normalizeFuturesExitLevels({
+      side: signal.side,
+      entry: signal.entry,
+      stopLoss: signal.stopLoss,
+      takeProfit: signal.takeProfit,
+      tp2: signal.tp2,
+      tp3: signal.tp3,
+      minStopPricePct: settings.cryptoMinStopPricePct,
+      minTakeProfitPricePct: settings.cryptoMinTakeProfitPricePct,
+      leverage: settings.cryptoRequestedLeverage,
+    });
+
     const rollingWinRate = backtest.tradesEvaluated === 0 ? signal.confidence : backtest.winRate;
     const score = backtest.tradesEvaluated === 0
       ? signal.confidence
       : backtest.score + Math.max(0, Math.min(100, liquidityScore)) * 0.001;
     const candleTime = ltf.at(-1)?.time ?? Date.now();
     const fingerprint = sha256([
-      'BINANCE', symbol, signal.side, signal.strategy, String(candleTime),
-      roundKey(signal.stopLoss), roundKey(signal.takeProfit),
+      'BINANCE-FUTURES', symbol, signal.side, signal.strategy, String(candleTime),
+      roundKey(exits.stopLoss), roundKey(exits.takeProfit),
     ].join('|'));
 
     return {
@@ -212,13 +222,14 @@ export class CryptoMarketScanner {
       signalFingerprint: fingerprint,
       broker: 'BINANCE', symbol, side: signal.side, timeframe: '1m/15m', strategy: signal.strategy,
       confidence: signal.confidence, rollingWinRate, expectancy: backtest.expectancyPct, score,
-      entry: signal.entry, stopLoss: signal.stopLoss, takeProfit: signal.takeProfit, tp2: signal.tp2, tp3: signal.tp3,
+      entry: signal.entry, stopLoss: exits.stopLoss, takeProfit: exits.takeProfit, tp2: exits.tp2, tp3: exits.tp3,
       createdAt: Date.now(),
       metadata: {
         reason: signal.reason, atr: signal.atr, backtest, liquidityScore,
         rollingWinRateSource: backtest.tradesEvaluated === 0 ? 'SIGNAL_CONFIDENCE_NO_HISTORY' : 'ROLLING_BACKTEST_V335',
-        strategyCompatibility: 'V33.5_ORIGINAL', trendSource: `${symbol}:M15_EMA20_50_200`,
+        strategyCompatibility: 'V33.5_ORIGINAL_SETUP_WITH_FUTURES_EXIT_PROFILE', trendSource: `${symbol}:M15_EMA20_50_200`,
         decisionWindows: { m1: 100, m15: 210 }, candleTime,
+        futuresExitProfile: exits,
       },
     };
   }
