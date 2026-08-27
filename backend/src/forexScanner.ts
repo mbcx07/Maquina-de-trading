@@ -33,10 +33,10 @@ export class ForexMarketScanner {
     this.timer = null;
   }
 
-  async runCycle(): Promise<void> {
+  async runCycle(forceManual = false): Promise<void> {
     if (this.running) return;
     const settings = this.getSettings();
-    if (!settings.engineEnabled) {
+    if (!settings.engineEnabled && !forceManual) {
       this.saveState({ status: 'PAUSED', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
       return;
     }
@@ -60,6 +60,7 @@ export class ForexMarketScanner {
     try {
       this.saveState({
         status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+        trigger: forceManual ? 'MANUAL' : 'SCHEDULED',
         telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, total: symbols.length, scanned: 0, signals: 0, errors: 0,
       });
@@ -77,6 +78,7 @@ export class ForexMarketScanner {
 
         this.saveState({
           status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+          trigger: forceManual ? 'MANUAL' : 'SCHEDULED',
           telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
           startedAt, total: symbols.length, scanned: index + 1, current: symbol,
           signals: freshSignals.length, errors, usage: this.market.getUsage(),
@@ -115,6 +117,7 @@ export class ForexMarketScanner {
       this.saveState({
         status: errors === symbols.length && symbols.length > 0 ? 'DATA_ERROR' : 'IDLE',
         mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+        trigger: forceManual ? 'MANUAL' : 'SCHEDULED',
         telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, completedAt: Date.now(), total: symbols.length, scanned: symbols.length,
         signals: freshSignals.length, qualified: qualified.length, sent, errors, deliveryErrors,
@@ -130,7 +133,7 @@ export class ForexMarketScanner {
   private async loop(): Promise<void> {
     if (this.stopped) return;
     try {
-      await this.runCycle();
+      await this.runCycle(false);
     } catch (error) {
       this.saveState({
         status: 'ERROR', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
