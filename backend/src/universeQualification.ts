@@ -3,6 +3,7 @@ import { TradingDatabase } from './database.js';
 import { auditV335Symbol, defaultAuditRules, type SymbolAuditResult } from './universeAuditCore.js';
 
 const DAY = 24 * 60 * 60_000;
+const ERROR_BACKOFF_MS = 15 * 60_000;
 
 export interface UniverseAuditState {
   status: 'IDLE' | 'RUNNING' | 'COMPLETED' | 'ERROR';
@@ -45,9 +46,15 @@ export class UniverseQualificationService {
   }
 
   shouldRefresh(maxAgeDays = 7): boolean {
+    if (this.running) return false;
     const state = this.getState();
-    if (state.status !== 'COMPLETED' || !state.completedAt) return !this.running;
-    return Date.now() - state.completedAt > maxAgeDays * DAY;
+    if (state.status === 'COMPLETED' && state.completedAt) {
+      return Date.now() - state.completedAt > maxAgeDays * DAY;
+    }
+    if (state.status === 'ERROR' && state.completedAt) {
+      return Date.now() - state.completedAt >= ERROR_BACKOFF_MS;
+    }
+    return true;
   }
 
   runInBackground(days = 14): void {
@@ -114,10 +121,11 @@ export class UniverseQualificationService {
       this.save(state);
       return state;
     } catch (error) {
+      const previous = this.getState();
       const state: UniverseAuditState = {
         status: 'ERROR', startedAt, completedAt: Date.now(),
         error: error instanceof Error ? error.message : String(error),
-        qualifiedSymbols: this.getState().qualifiedSymbols ?? [],
+        qualifiedSymbols: previous.qualifiedSymbols ?? [],
       };
       this.save(state);
       throw error;
