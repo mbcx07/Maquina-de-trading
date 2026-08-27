@@ -4,7 +4,7 @@ import path from 'node:path';
 import { env } from './config.js';
 import { TradingDatabase } from './database.js';
 
-export type IntegrationProvider = 'BINANCE' | 'TELEGRAM' | 'MT5';
+export type IntegrationProvider = 'BINANCE' | 'TELEGRAM' | 'MT5' | 'TWELVE_DATA';
 
 export interface BinanceCredentials {
   apiKey: string;
@@ -19,6 +19,10 @@ export interface TelegramCredentials {
 export interface Mt5BridgeCredentials {
   bridgeUrl: string;
   bridgeToken: string;
+}
+
+export interface TwelveDataCredentials {
+  apiKey: string;
 }
 
 export interface IntegrationStatus {
@@ -53,7 +57,7 @@ export class IntegrationVault {
       WHERE type = 'table' AND name = 'integration_credentials'
     `).get() as { sql?: string } | undefined;
 
-    if (existing?.sql && !existing.sql.includes("'MT5'")) {
+    if (existing?.sql && !existing.sql.includes("'TWELVE_DATA'")) {
       this.database.db.exec(`
         BEGIN IMMEDIATE;
         DROP INDEX IF EXISTS idx_integration_workspace;
@@ -61,7 +65,7 @@ export class IntegrationVault {
 
         CREATE TABLE integration_credentials (
           workspace_id TEXT NOT NULL,
-          provider TEXT NOT NULL CHECK (provider IN ('BINANCE','TELEGRAM','MT5')),
+          provider TEXT NOT NULL CHECK (provider IN ('BINANCE','TELEGRAM','MT5','TWELVE_DATA')),
           encrypted_payload TEXT NOT NULL,
           masked_primary TEXT,
           masked_secondary TEXT,
@@ -93,7 +97,7 @@ export class IntegrationVault {
     this.database.db.exec(`
       CREATE TABLE IF NOT EXISTS integration_credentials (
         workspace_id TEXT NOT NULL,
-        provider TEXT NOT NULL CHECK (provider IN ('BINANCE','TELEGRAM','MT5')),
+        provider TEXT NOT NULL CHECK (provider IN ('BINANCE','TELEGRAM','MT5','TWELVE_DATA')),
         encrypted_payload TEXT NOT NULL,
         masked_primary TEXT,
         masked_secondary TEXT,
@@ -132,6 +136,12 @@ export class IntegrationVault {
     this.save(workspaceId, 'MT5', { bridgeUrl, bridgeToken }, bridgeUrl, mask(bridgeToken, 3, 3));
   }
 
+  saveTwelveData(workspaceId: string, credentials: TwelveDataCredentials): void {
+    const apiKey = credentials.apiKey.trim();
+    if (apiKey.length < 8) throw new Error('TWELVE_DATA_API_KEY_REQUIRED');
+    this.save(workspaceId, 'TWELVE_DATA', { apiKey }, mask(apiKey, 4, 4), 'FOREX DATA');
+  }
+
   getBinance(workspaceId: string): BinanceCredentials | null {
     return this.get<BinanceCredentials>(workspaceId, 'BINANCE');
   }
@@ -144,6 +154,10 @@ export class IntegrationVault {
     return this.get<Mt5BridgeCredentials>(workspaceId, 'MT5');
   }
 
+  getTwelveData(workspaceId: string): TwelveDataCredentials | null {
+    return this.get<TwelveDataCredentials>(workspaceId, 'TWELVE_DATA');
+  }
+
   getStatus(workspaceId: string): IntegrationStatus[] {
     const rows = this.database.db.prepare(`
       SELECT provider, masked_primary, masked_secondary, last_test_ok, last_test_at,
@@ -154,7 +168,7 @@ export class IntegrationVault {
     `).all(workspaceId) as Array<Record<string, unknown>>;
 
     const map = new Map(rows.map((row) => [String(row.provider), row]));
-    return (['BINANCE', 'TELEGRAM', 'MT5'] as IntegrationProvider[]).map((provider) => {
+    return (['BINANCE', 'TELEGRAM', 'TWELVE_DATA', 'MT5'] as IntegrationProvider[]).map((provider) => {
       const row = map.get(provider);
       if (!row) return { provider, configured: false };
       return {
@@ -248,11 +262,7 @@ export class IntegrationVault {
   private decrypt(serialized: string): string {
     const envelope = JSON.parse(serialized) as SecretEnvelope;
     if (envelope.v !== 1) throw new Error('UNSUPPORTED_SECRET_ENVELOPE');
-    const decipher = crypto.createDecipheriv(
-      'aes-256-gcm',
-      this.key,
-      Buffer.from(envelope.iv, 'base64url'),
-    );
+    const decipher = crypto.createDecipheriv('aes-256-gcm', this.key, Buffer.from(envelope.iv, 'base64url'));
     decipher.setAuthTag(Buffer.from(envelope.tag, 'base64url'));
     const plaintext = Buffer.concat([
       decipher.update(Buffer.from(envelope.ciphertext, 'base64url')),
