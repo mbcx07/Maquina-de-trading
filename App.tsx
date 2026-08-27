@@ -72,7 +72,7 @@ const App: React.FC = () => {
       : action === 'pause'
         ? v34Api.pauseEngine()
         : v34Api.emergencyStop(),
-    action === 'start' ? 'Motor iniciado.' : action === 'pause' ? 'Motor pausado.' : 'Emergency Stop ejecutado.',
+    action === 'start' ? 'Motor iniciado. Forex puede conectarse después.' : action === 'pause' ? 'Motor pausado.' : 'Emergency Stop ejecutado.',
   );
 
   return (
@@ -124,8 +124,8 @@ function Header({ state, view, setView, busy, lastSync, engineOn, patchSettings,
             </h1>
             <div className="flex flex-wrap gap-3 mt-2 text-[8px] font-black uppercase tracking-widest text-slate-500">
               <Connection label="Binance" ok={Boolean(binance.connected) || settings.appMode === 'PAPER'} />
-              <Connection label="Forex Data" ok={Boolean(forexData.connected)} />
-              <Connection label="Telegram" ok={Boolean(telegram.connected)} />
+              <Connection label={forexData.configured ? 'Forex Data' : 'Forex pendiente'} ok={Boolean(forexData.connected)} pending={!forexData.configured} />
+              <Connection label={telegram.configured ? 'Telegram' : 'Telegram pendiente'} ok={Boolean(telegram.connected)} pending={!telegram.configured} />
               <span>Linux</span>
               <span>DB persistent</span>
               <span>Sync {lastSync ? new Date(lastSync).toLocaleTimeString() : '—'}</span>
@@ -178,10 +178,14 @@ function Dashboard({ state, patchSettings }: any) {
   const forexSignals = state.forexSignals || [];
   const forexStats = state.forexSignalStats || {};
   const recentTrades = state.recentTrades || [];
+  const binance = state.brokerStatus?.binance || {};
+  const forexData = state.brokerStatus?.forexData || {};
 
   return (
     <>
-      <section className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+      <section className="grid grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8 gap-3">
+        <Metric title="Saldo Futures" value={settings.appMode === 'PAPER' ? 'PAPER' : binance.connected ? money(binance.balance) : '—'} />
+        <Metric title="Disponible" value={settings.appMode === 'PAPER' ? 'PAPER' : binance.connected ? money(binance.availableBalance) : '—'} />
         <Metric title="Net Profit" value={money(metrics.netProfit)} tone={Number(metrics.netProfit) >= 0 ? 'green' : 'red'} />
         <Metric title="Win Rate" value={pct(metrics.winRate)} />
         <Metric title="Profit Factor" value={factor(metrics.profitFactor)} />
@@ -190,10 +194,17 @@ function Dashboard({ state, patchSettings }: any) {
         <Metric title="Forex signals 24h" value={String(forexStats.sent24h || 0)} />
       </section>
 
+      {settings.appMode !== 'PAPER' && binance.configured && !binance.connected && (
+        <Banner tone="error">Binance está configurado pero no pudo consultar la cuenta: {binance.error || 'revisa permisos Futures, IP whitelist y API Key/Secret.'}</Banner>
+      )}
+
       <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <MarketPanel title="CRYPTO · BINANCE FUTURES" subtitle="Automático · máximo 10 coins · símbolos únicos" accent="indigo">
           <ScannerLine scanner={state.scanners?.crypto} />
           <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
+            <InfoBox label="Saldo Futures" value={settings.appMode === 'PAPER' ? 'PAPER' : binance.connected ? money(binance.balance) : '—'} />
+            <InfoBox label="Disponible" value={settings.appMode === 'PAPER' ? 'PAPER' : binance.connected ? money(binance.availableBalance) : '—'} />
+            <InfoBox label="API Binance" value={settings.appMode === 'PAPER' ? 'PAPER' : binance.connected ? 'CONECTADA' : binance.configured ? 'REVISAR' : 'NO CONFIGURADA'} />
             <NumberSetting label="Slots" value={settings.maxConcurrentCryptoTrades} min={1} max={10} step={1} suffix="/10" onSave={(v: number) => patchSettings({ maxConcurrentCryptoTrades: v })} />
             <NumberSetting label="Margen / trade" value={settings.cryptoMarginPctPerTrade} min={0.01} max={100} step={0.1} suffix="%" onSave={(v: number) => patchSettings({ cryptoMarginPctPerTrade: v })} />
             <NumberSetting label="Leverage" value={settings.cryptoRequestedLeverage} min={1} max={125} step={1} suffix="x" onSave={(v: number) => patchSettings({ cryptoRequestedLeverage: v })} />
@@ -206,7 +217,12 @@ function Dashboard({ state, patchSettings }: any) {
           <Block title="HISTORIAL BINANCE"><TradeHistory rows={recentTrades.slice(0, 20)} /></Block>
         </MarketPanel>
 
-        <MarketPanel title="FOREX · SIGNAL DESK" subtitle="Solo señales Telegram · ejecución manual" accent="cyan">
+        <MarketPanel title="FOREX · SIGNAL DESK" subtitle="Solo señales Telegram · ejecución manual · opcional" accent="cyan">
+          {!forexData.configured && (
+            <div className="rounded-2xl bg-amber-500/5 border border-amber-500/20 p-4 text-[9px] text-amber-200/80 leading-5">
+              FOREX PENDIENTE. Puedes conectarlo después; no bloquea Binance ni el arranque del motor Crypto.
+            </div>
+          )}
           <ScannerLine scanner={state.scanners?.forex} />
           <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
             <InfoBox label="Modo" value="SIGNAL ONLY" />
@@ -232,6 +248,7 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
   const binance = statusOf(integrations, 'BINANCE');
   const telegram = statusOf(integrations, 'TELEGRAM');
   const forexData = statusOf(integrations, 'TWELVE_DATA');
+  const binanceRuntime = state.brokerStatus?.binance || {};
 
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
@@ -249,7 +266,7 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
 
   const estimatedCredits = useMemo(() => {
     const count = (settings.forexSymbols || []).length;
-    const interval = Math.max(1, Number(settings.forexSignalScanIntervalMinutes || 15));
+    const interval = Math.max(1, Number(settings.forexSignalScanIntervalMinutes || 20));
     return Math.ceil(count * 2 * (1440 / interval));
   }, [settings.forexSymbols, settings.forexSignalScanIntervalMinutes]);
 
@@ -259,12 +276,23 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
         <p className="text-[8px] uppercase tracking-[0.25em] font-black text-indigo-400">Linux individual</p>
         <h2 className="text-2xl md:text-3xl font-black text-white tracking-tight mt-2">Integraciones del motor</h2>
         <p className="text-[10px] text-slate-400 leading-6 mt-3 max-w-5xl">
-          Binance ejecuta Crypto automáticamente. Forex usa Twelve Data únicamente como fuente de velas y envía señales a Telegram; no existe conexión MT5 ni ejecución Forex automática.
+          Binance puede funcionar por sí solo. Forex Data y Telegram son opcionales mientras haces la prueba Crypto y puedes conectarlos después sin reinstalar el sistema.
         </p>
       </section>
 
       <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <IntegrationCard title="BINANCE FUTURES" status={binance} description="USDⓈ-M Futures · ejecución automática Crypto">
+          {settings.appMode !== 'PAPER' && binanceRuntime.connected && (
+            <div className="grid grid-cols-2 gap-2">
+              <InfoBox label="Saldo Futures" value={money(binanceRuntime.balance)} />
+              <InfoBox label="Disponible" value={money(binanceRuntime.availableBalance)} />
+            </div>
+          )}
+          {settings.appMode !== 'PAPER' && binanceRuntime.configured && !binanceRuntime.connected && (
+            <div className="rounded-xl bg-rose-500/5 border border-rose-500/20 p-3 text-[8px] text-rose-300 leading-5">
+              {binanceRuntime.error || 'No fue posible consultar Binance Futures.'}
+            </div>
+          )}
           <TextField label="API Key" value={apiKey} onChange={setApiKey} placeholder={binance.configured ? 'Nueva API Key para reemplazar' : 'API Key'} />
           <TextField label="API Secret" value={apiSecret} onChange={setApiSecret} placeholder="API Secret" secret />
           <Hint>Permiso Futures habilitado; retiros deshabilitados. En REAL usa whitelist de IP del VPS.</Hint>
@@ -280,9 +308,9 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
           />
         </IntegrationCard>
 
-        <IntegrationCard title="FOREX DATA" status={forexData} description="Twelve Data · solo market data">
+        <IntegrationCard title="FOREX DATA · OPCIONAL" status={forexData} description="Twelve Data · puedes conectarlo después">
           <TextField label="API Key" value={forexDataKey} onChange={setForexDataKey} placeholder={forexData.configured ? 'Nueva key para reemplazar' : 'Twelve Data API Key'} secret />
-          <Hint>La key se guarda cifrada. No puede abrir, cerrar ni modificar operaciones.</Hint>
+          <Hint>No es requisito para Binance. La key se guarda cifrada y solo permite leer datos de mercado.</Hint>
           <div className="grid grid-cols-2 gap-2">
             <InfoBox label="Pares" value={String((settings.forexSymbols || []).length)} />
             <InfoBox label="Créditos/día est." value={String(estimatedCredits)} />
@@ -299,10 +327,10 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
           />
         </IntegrationCard>
 
-        <IntegrationCard title="TELEGRAM" status={telegram} description="Aperturas/cierres Crypto + señales Forex">
+        <IntegrationCard title="TELEGRAM · OPCIONAL" status={telegram} description="Alertas Crypto + señales Forex">
           <TextField label="Bot Token" value={botToken} onChange={setBotToken} placeholder={telegram.configured ? 'Nuevo token para reemplazar' : 'Token de BotFather'} secret />
           <TextField label="Chat ID / Canal" value={chatId} onChange={setChatId} placeholder="Chat ID" />
-          <Hint>Guardar envía un mensaje de prueba. Forex necesita Telegram conectado para iniciar el motor.</Hint>
+          <Hint>Binance puede funcionar sin Telegram. Conéctalo después para recibir aperturas, cierres y señales Forex.</Hint>
           <IntegrationActions
             busy={busy}
             configured={telegram.configured}
@@ -331,7 +359,7 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
           </div>
         </Panel>
 
-        <Panel title="FOREX SIGNAL ENGINE">
+        <Panel title="FOREX SIGNAL ENGINE · OPCIONAL">
           <label className="block">
             <span className="field-label">Pares</span>
             <textarea value={forexSymbols} onChange={(e) => setForexSymbols(e.target.value)} className="field min-h-28" />
@@ -343,7 +371,7 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
             <NumberSetting label="Rolling WR mín." value={settings.forexMinRollingWinRate} min={0} max={100} step={1} suffix="%" onSave={(v: number) => patchSettings({ forexMinRollingWinRate: v })} />
           </div>
           <div className="mt-3 flex items-center justify-between gap-3">
-            <Hint>Con 4 pares y 15 min son ~768 créditos/día. Si aumentas pares o frecuencia, revisa el límite de tu plan de datos.</Hint>
+            <Hint>Con 4 pares y 20 min son ~576 créditos/día. Puedes dejar este módulo pendiente mientras pruebas Binance.</Hint>
             <PrimaryButton onClick={() => void saveSymbols()}>Guardar pares</PrimaryButton>
           </div>
         </Panel>
@@ -496,7 +524,7 @@ function statusOf(items: any[], provider: IntegrationProvider): any {
   return items.find((item) => item.provider === provider) || { provider, configured: false };
 }
 
-const Connection = ({ label, ok }: any) => <span className="flex items-center gap-1.5"><i className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-emerald-400' : 'bg-rose-500'}`} />{label}</span>;
+const Connection = ({ label, ok, pending = false }: any) => <span className="flex items-center gap-1.5"><i className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-emerald-400' : pending ? 'bg-amber-400' : 'bg-rose-500'}`} />{label}</span>;
 const Nav = ({ active, children, onClick }: any) => <button onClick={onClick} className={`px-4 py-2 rounded-xl text-[9px] uppercase font-black tracking-widest border ${active ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-black/20 border-slate-800 text-slate-500'}`}>{children}</button>;
 
 function Metric({ title, value, tone }: any) {
