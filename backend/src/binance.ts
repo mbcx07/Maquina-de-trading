@@ -62,8 +62,6 @@ export class BinanceUsdmClient {
   private credentials(): BinanceCredentials {
     const fromVault = this.getCredentials?.();
     if (fromVault?.apiKey && fromVault?.apiSecret) return fromVault;
-
-    // Legacy fallback to help migrate an existing single-user installation.
     if (env.BINANCE_API_KEY && env.BINANCE_API_SECRET) {
       return { apiKey: env.BINANCE_API_KEY, apiSecret: env.BINANCE_API_SECRET };
     }
@@ -71,12 +69,17 @@ export class BinanceUsdmClient {
   }
 
   hasCredentials(): boolean {
-    try {
-      this.credentials();
-      return true;
-    } catch {
-      return false;
-    }
+    try { this.credentials(); return true; }
+    catch { return false; }
+  }
+
+  async getMarkPrice(symbol: string): Promise<number> {
+    const response = await fetch(`${this.baseUrl()}/fapi/v1/premiumIndex?symbol=${encodeURIComponent(symbol.toUpperCase())}`);
+    if (!response.ok) throw new Error(`BINANCE_MARK_PRICE_HTTP_${response.status}:${symbol}`);
+    const row = await response.json() as { markPrice?: string | number };
+    const mark = Number(row.markPrice ?? 0);
+    if (!Number.isFinite(mark) || mark <= 0) throw new Error(`BINANCE_MARK_PRICE_INVALID:${symbol}`);
+    return mark;
   }
 
   async syncTime(): Promise<void> {
@@ -92,20 +95,13 @@ export class BinanceUsdmClient {
     params: Record<string, string | number | boolean | undefined> = {},
   ): Promise<T> {
     const credentials = this.credentials();
-
     const query = new URLSearchParams();
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined) query.set(key, String(value));
-    }
+    for (const [key, value] of Object.entries(params)) if (value !== undefined) query.set(key, String(value));
     query.set('timestamp', String(Date.now() + this.timeOffset));
     query.set('recvWindow', '5000');
 
-    const signature = crypto
-      .createHmac('sha256', credentials.apiSecret)
-      .update(query.toString())
-      .digest('hex');
+    const signature = crypto.createHmac('sha256', credentials.apiSecret).update(query.toString()).digest('hex');
     query.set('signature', signature);
-
     const isGet = method === 'GET';
     const url = `${this.baseUrl()}${endpoint}${isGet ? `?${query.toString()}` : ''}`;
     const response = await fetch(url, {
@@ -120,7 +116,6 @@ export class BinanceUsdmClient {
     const text = await response.text();
     let data: unknown;
     try { data = JSON.parse(text); } catch { data = text; }
-
     if (!response.ok) {
       const payload = data as { code?: number; msg?: string };
       if (payload?.code === -1021) {
@@ -129,16 +124,13 @@ export class BinanceUsdmClient {
       }
       throw new Error(`BINANCE_${payload?.code ?? response.status}:${payload?.msg ?? text.slice(0, 160)}`);
     }
-
     return data as T;
   }
 
   async testConnection(): Promise<{ ok: true; balance: number; availableBalance: number; openPositions: number }> {
     await this.syncTime();
     const [balance, availableBalance, positions] = await Promise.all([
-      this.getFuturesBalance(),
-      this.getAvailableBalance(),
-      this.getPositions(),
+      this.getFuturesBalance(), this.getAvailableBalance(), this.getPositions(),
     ]);
     return { ok: true, balance, availableBalance, openPositions: positions.length };
   }
@@ -147,16 +139,13 @@ export class BinanceUsdmClient {
     const response = await fetch(`${this.baseUrl()}/fapi/v1/exchangeInfo`);
     if (!response.ok) throw new Error(`BINANCE_EXCHANGE_INFO_HTTP_${response.status}`);
     const data = await response.json() as { symbols: any[] };
-
     this.symbolMeta.clear();
     for (const symbol of data.symbols ?? []) {
       if (symbol.contractType !== 'PERPETUAL' || symbol.status !== 'TRADING' || symbol.quoteAsset !== 'USDT') continue;
-
       const lot = symbol.filters?.find((f: any) => f.filterType === 'MARKET_LOT_SIZE')
         ?? symbol.filters?.find((f: any) => f.filterType === 'LOT_SIZE');
       const minNotional = symbol.filters?.find((f: any) => f.filterType === 'MIN_NOTIONAL');
       const priceFilter = symbol.filters?.find((f: any) => f.filterType === 'PRICE_FILTER');
-
       this.symbolMeta.set(symbol.symbol, {
         symbol: symbol.symbol,
         filters: {
@@ -191,24 +180,17 @@ export class BinanceUsdmClient {
 
   async getPositions(): Promise<BinancePosition[]> {
     const rows = await this.signedRequest<any[]>('/fapi/v3/positionRisk', 'GET');
-    return rows
-      .map((row) => ({
-        symbol: String(row.symbol),
-        positionAmt: Number(row.positionAmt ?? 0),
-        entryPrice: Number(row.entryPrice ?? 0),
-        markPrice: Number(row.markPrice ?? 0),
-        unrealizedProfit: Number(row.unRealizedProfit ?? row.unrealizedProfit ?? 0),
-        leverage: Number(row.leverage ?? 1),
-      }))
-      .filter((row) => Math.abs(row.positionAmt) > 0);
+    return rows.map((row) => ({
+      symbol: String(row.symbol), positionAmt: Number(row.positionAmt ?? 0), entryPrice: Number(row.entryPrice ?? 0),
+      markPrice: Number(row.markPrice ?? 0), unrealizedProfit: Number(row.unRealizedProfit ?? row.unrealizedProfit ?? 0),
+      leverage: Number(row.leverage ?? 1),
+    })).filter((row) => Math.abs(row.positionAmt) > 0);
   }
 
   async assertSymbolNotOpen(symbol: string): Promise<void> {
     const normalized = symbol.toUpperCase();
     const positions = await this.getPositions();
-    if (positions.some((position) => position.symbol === normalized)) {
-      throw new Error(`BINANCE_SYMBOL_ALREADY_OPEN:${normalized}`);
-    }
+    if (positions.some((position) => position.symbol === normalized)) throw new Error(`BINANCE_SYMBOL_ALREADY_OPEN:${normalized}`);
   }
 
   async getMaxAllowedLeverage(symbol: string): Promise<number> {
@@ -223,23 +205,18 @@ export class BinanceUsdmClient {
     const maxAllowed = await this.getMaxAllowedLeverage(symbol);
     const leverage = Math.max(1, Math.min(requested, maxAllowed));
     const result = await this.signedRequest<{ leverage: number }>('/fapi/v1/leverage', 'POST', {
-      symbol: symbol.toUpperCase(),
-      leverage,
+      symbol: symbol.toUpperCase(), leverage,
     });
     return Number(result.leverage ?? leverage);
   }
 
   async createMarketOrder(symbol: string, side: TradeSide, quantity: number): Promise<any> {
     if (this.getSettings().appMode === 'PAPER') {
-      return { paper: true, orderId: `PAPER-${Date.now()}`, symbol, side, quantity };
+      const fillPrice = await this.getMarkPrice(symbol);
+      return { paper: true, orderId: `PAPER-${Date.now()}`, symbol, side, quantity, avgPrice: String(fillPrice) };
     }
-
     return this.signedRequest('/fapi/v1/order', 'POST', {
-      symbol: symbol.toUpperCase(),
-      side,
-      type: 'MARKET',
-      quantity,
-      newOrderRespType: 'RESULT',
+      symbol: symbol.toUpperCase(), side, type: 'MARKET', quantity, newOrderRespType: 'RESULT',
     });
   }
 
@@ -250,43 +227,22 @@ export class BinanceUsdmClient {
     triggerPrice: number,
     clientAlgoId: string,
   ): Promise<any> {
-    if (this.getSettings().appMode === 'PAPER') {
-      return { paper: true, algoId: `PAPER-${type}-${Date.now()}` };
-    }
-
+    if (this.getSettings().appMode === 'PAPER') return { paper: true, algoId: `PAPER-${type}-${Date.now()}` };
     return this.signedRequest('/fapi/v1/algoOrder', 'POST', {
-      algoType: 'CONDITIONAL',
-      symbol: symbol.toUpperCase(),
-      side: exitSide,
-      type,
-      triggerPrice,
-      closePosition: true,
-      workingType: 'MARK_PRICE',
-      clientAlgoId,
-      newOrderRespType: 'RESULT',
+      algoType: 'CONDITIONAL', symbol: symbol.toUpperCase(), side: exitSide, type, triggerPrice,
+      closePosition: true, workingType: 'MARK_PRICE', clientAlgoId, newOrderRespType: 'RESULT',
     });
   }
 
   async getAccountTrades(symbol: string, startTime?: number): Promise<BinanceAccountTrade[]> {
     const rows = await this.signedRequest<any[]>('/fapi/v1/userTrades', 'GET', {
-      symbol: symbol.toUpperCase(),
-      startTime,
-      limit: 1000,
+      symbol: symbol.toUpperCase(), startTime, limit: 1000,
     });
-
     return rows.map((row) => ({
-      symbol: String(row.symbol),
-      id: Number(row.id),
-      orderId: Number(row.orderId),
-      side: String(row.side) as TradeSide,
-      price: Number(row.price ?? 0),
-      qty: Number(row.qty ?? 0),
-      realizedPnl: Number(row.realizedPnl ?? 0),
-      commission: Number(row.commission ?? 0),
-      commissionAsset: String(row.commissionAsset ?? ''),
-      time: Number(row.time ?? 0),
-      buyer: Boolean(row.buyer),
-      maker: Boolean(row.maker),
+      symbol: String(row.symbol), id: Number(row.id), orderId: Number(row.orderId), side: String(row.side) as TradeSide,
+      price: Number(row.price ?? 0), qty: Number(row.qty ?? 0), realizedPnl: Number(row.realizedPnl ?? 0),
+      commission: Number(row.commission ?? 0), commissionAsset: String(row.commissionAsset ?? ''), time: Number(row.time ?? 0),
+      buyer: Boolean(row.buyer), maker: Boolean(row.maker),
     }));
   }
 
@@ -296,26 +252,16 @@ export class BinanceUsdmClient {
     incomeType?: 'FUNDING_FEE' | 'REALIZED_PNL' | 'COMMISSION',
   ): Promise<BinanceIncome[]> {
     const rows = await this.signedRequest<any[]>('/fapi/v1/income', 'GET', {
-      symbol: symbol.toUpperCase(),
-      startTime,
-      incomeType,
-      limit: 1000,
+      symbol: symbol.toUpperCase(), startTime, incomeType, limit: 1000,
     });
-
     return rows.map((row) => ({
-      symbol: String(row.symbol ?? ''),
-      incomeType: String(row.incomeType ?? ''),
-      income: Number(row.income ?? 0),
-      asset: String(row.asset ?? ''),
-      time: Number(row.time ?? 0),
-      tranId: row.tranId == null ? undefined : Number(row.tranId),
+      symbol: String(row.symbol ?? ''), incomeType: String(row.incomeType ?? ''), income: Number(row.income ?? 0),
+      asset: String(row.asset ?? ''), time: Number(row.time ?? 0), tranId: row.tranId == null ? undefined : Number(row.tranId),
     }));
   }
 
   async cancelAllAlgoOpenOrders(symbol: string): Promise<void> {
     if (this.getSettings().appMode === 'PAPER') return;
-    await this.signedRequest('/fapi/v1/algoOpenOrders', 'DELETE', {
-      symbol: symbol.toUpperCase(),
-    });
+    await this.signedRequest('/fapi/v1/algoOpenOrders', 'DELETE', { symbol: symbol.toUpperCase() });
   }
 }
