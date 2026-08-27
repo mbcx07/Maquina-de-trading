@@ -4,7 +4,7 @@ import { auditV335Symbol, defaultAuditRules, type SymbolAuditResult } from './un
 
 const DAY = 24 * 60 * 60_000;
 const ERROR_BACKOFF_MS = 15 * 60_000;
-const AUDIT_MODEL = 'V33.5_STRUCTURAL_H45';
+const AUDIT_MODEL = 'V33.5_M5_M15_H45';
 
 export interface UniverseAuditState {
   status: 'IDLE' | 'RUNNING' | 'COMPLETED' | 'ERROR';
@@ -119,10 +119,11 @@ export class UniverseQualificationService {
       const state: UniverseAuditState = {
         status: 'ERROR', startedAt, completedAt: Date.now(),
         error: error instanceof Error ? error.message : String(error),
-        qualifiedSymbols: previous.qualifiedSymbols ?? [],
-        results: previous.results ?? [],
+        // Do not trust symbols qualified under a previous timeframe model.
+        qualifiedSymbols: String(previous.rules?.exitModel ?? '') === AUDIT_MODEL ? (previous.qualifiedSymbols ?? []) : [],
+        results: String(previous.rules?.exitModel ?? '') === AUDIT_MODEL ? (previous.results ?? []) : [],
         errors: previous.errors ?? [],
-        rules: previous.rules ?? { exitModel: AUDIT_MODEL },
+        rules: { ...rules, days },
       };
       this.save(state);
       throw error;
