@@ -147,6 +147,8 @@ app.get('/api/state', async (_req, res) => {
         provider: 'TWELVE_DATA',
         configured: forexData.hasCredentials(),
         connected: forexDataIntegration?.lastTestOk === true,
+        optional: true,
+        status: forexData.hasCredentials() ? 'CONFIGURED' : 'PENDING',
         masked: forexDataIntegration?.maskedPrimary,
         usage: forexData.getUsage(),
       },
@@ -154,14 +156,26 @@ app.get('/api/state', async (_req, res) => {
 
     if (settings.appMode !== 'PAPER' && settings.cryptoEnabled && binance.hasCredentials()) {
       try {
-        const positions = await binance.getPositions();
+        const [positions, balance, availableBalance] = await Promise.all([
+          binance.getPositions(),
+          binance.getFuturesBalance(),
+          binance.getAvailableBalance(),
+        ]);
         brokerStatus.binance = {
-          configured: true, connected: true, openPositions: positions.length,
+          configured: true,
+          connected: true,
+          asset: 'USDT',
+          balance,
+          availableBalance,
+          openPositions: positions.length,
           masked: binanceIntegration?.maskedPrimary,
         };
       } catch (error) {
         brokerStatus.binance = {
-          configured: true, connected: false, error: errorMessage(error), masked: binanceIntegration?.maskedPrimary,
+          configured: true,
+          connected: false,
+          error: errorMessage(error),
+          masked: binanceIntegration?.maskedPrimary,
         };
       }
     }
@@ -223,15 +237,23 @@ app.post('/api/engine/start', async (_req, res) => {
     const risk = await riskGuard.evaluate();
     if (risk.status === 'TRIPPED') return res.status(409).json({ error: 'RISK_KILL_SWITCH_TRIPPED', riskGuard: risk });
 
-    if (settings.appMode !== 'PAPER' && settings.cryptoEnabled && !binance.hasCredentials()) {
-      return res.status(409).json({ error: 'BINANCE_CREDENTIALS_REQUIRED_FOR_CRYPTO' });
+    if (settings.appMode !== 'PAPER' && settings.cryptoEnabled) {
+      if (!binance.hasCredentials()) {
+        return res.status(409).json({ error: 'BINANCE_CREDENTIALS_REQUIRED_FOR_CRYPTO' });
+      }
+      try {
+        await binance.testConnection();
+      } catch (error) {
+        return res.status(409).json({
+          error: 'BINANCE_CONNECTION_REQUIRED_FOR_CRYPTO',
+          detail: errorMessage(error),
+        });
+      }
     }
-    if (settings.forexEnabled && !forexData.hasCredentials()) {
-      return res.status(409).json({ error: 'TWELVE_DATA_API_KEY_REQUIRED_FOR_FOREX_SIGNALS' });
-    }
-    if (settings.forexEnabled && !telegram.isConfigured()) {
-      return res.status(409).json({ error: 'TELEGRAM_REQUIRED_FOR_FOREX_SIGNALS' });
-    }
+
+    const warnings: string[] = [];
+    if (settings.forexEnabled && !forexData.hasCredentials()) warnings.push('FOREX_DATA_PENDING');
+    if (settings.forexEnabled && !telegram.isConfigured()) warnings.push('FOREX_TELEGRAM_PENDING');
 
     database.saveSettings({ ...settings, engineEnabled: true, forexExecutionMode: 'SIGNAL_ONLY' });
     database.db.prepare(`
@@ -239,7 +261,13 @@ app.post('/api/engine/start', async (_req, res) => {
       VALUES('emergencyStop', ?, ?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
     `).run(JSON.stringify({ active: false, clearedAt: Date.now() }), Date.now());
-    res.json({ ok: true, engineEnabled: true, forexExecutionMode: 'SIGNAL_ONLY' });
+    res.json({
+      ok: true,
+      engineEnabled: true,
+      forexExecutionMode: 'SIGNAL_ONLY',
+      forexReady: !settings.forexEnabled || (forexData.hasCredentials() && telegram.isConfigured()),
+      warnings,
+    });
   } catch (error) {
     res.status(500).json({ error: errorMessage(error) });
   }
