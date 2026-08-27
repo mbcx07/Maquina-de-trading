@@ -1,6 +1,5 @@
 import { analyzeStructureStrategyV335, runRollingBacktestV335 } from './analysisV335.js';
 import type { Candle } from './analysis.js';
-import { normalizeFuturesExitLevels } from './futuresExitProfile.js';
 import type { TradeSide } from './types.js';
 
 export interface AuditTrade {
@@ -51,15 +50,10 @@ export interface AuditRules {
   minTrades: number;
   minProfitFactor: number;
   minOosTrades: number;
-  minStopPricePct: number;
-  minTakeProfitPricePct: number;
+  exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS';
 }
 
-export const defaultAuditRules = (
-  startTime: number,
-  endTime: number,
-  overrides: Partial<Pick<AuditRules, 'minStopPricePct' | 'minTakeProfitPricePct'>> = {},
-): AuditRules => ({
+export const defaultAuditRules = (startTime: number, endTime: number): AuditRules => ({
   startTime,
   endTime,
   scanStepMinutes: 5,
@@ -69,8 +63,7 @@ export const defaultAuditRules = (
   minTrades: 5,
   minProfitFactor: 1.10,
   minOosTrades: 2,
-  minStopPricePct: overrides.minStopPricePct ?? 1,
-  minTakeProfitPricePct: overrides.minTakeProfitPricePct ?? 1.5,
+  exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
 });
 
 export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], rules: AuditRules): SymbolAuditResult {
@@ -88,6 +81,7 @@ export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], ru
     const htfEnd = upperBoundTime(h, current.time);
     if (htfEnd < 210) continue;
 
+    // Exact live decision windows used by the original v33.5 scanner.
     const ltfWindow = l.slice(i - 99, i + 1);
     const htfWindow = h.slice(htfEnd - 210, htfEnd);
     if (ltfWindow.length !== 100 || htfWindow.length !== 210) continue;
@@ -101,18 +95,9 @@ export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], ru
       : rolling.winRate >= rules.minRollingWinRate && signal.confidence >= rules.minSignalConfidence;
     if (!passes) continue;
 
-    const exits = normalizeFuturesExitLevels({
-      side: signal.side,
-      entry: signal.entry,
-      stopLoss: signal.stopLoss,
-      takeProfit: signal.takeProfit,
-      tp2: signal.tp2,
-      tp3: signal.tp3,
-      minStopPricePct: rules.minStopPricePct,
-      minTakeProfitPricePct: rules.minTakeProfitPricePct,
-    });
-
-    const resolved = resolve(signal.side, signal.entry, exits.stopLoss, exits.takeProfit, l, i);
+    // IMPORTANT: Futures leverage changes margin ROE and PnL sizing, not the price
+    // level at which the original strategy says structure/ATR is invalidated or TP1 is hit.
+    const resolved = resolve(signal.side, signal.entry, signal.stopLoss, signal.takeProfit, l, i);
     if (!resolved) continue;
     busyUntil = resolved.exitTime;
 
@@ -124,8 +109,8 @@ export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], ru
       side: signal.side,
       entry: signal.entry,
       exit: resolved.exit,
-      stopLoss: exits.stopLoss,
-      takeProfit: exits.takeProfit,
+      stopLoss: signal.stopLoss,
+      takeProfit: signal.takeProfit,
       grossReturnPct,
       netReturnPct,
       reason: resolved.reason,
