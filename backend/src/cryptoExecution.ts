@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import { BinanceUsdmClient } from './binance.js';
 import { TradingDatabase } from './database.js';
-import { normalizeFuturesExitLevels } from './futuresExitProfile.js';
 import { calculateMetrics } from './metrics.js';
 import { TradingRepository } from './repositories.js';
 import { calculateCryptoSizing, normalizeBinanceOrderSize } from './risk.js';
@@ -55,29 +54,16 @@ export class CryptoExecutionService {
     const maxAllowedLeverage = settings.appMode === 'PAPER'
       ? settings.cryptoRequestedLeverage
       : await this.binance.getMaxAllowedLeverage(opportunity.symbol);
-    const requestedEffectiveLeverage = Math.max(1, Math.min(settings.cryptoRequestedLeverage, maxAllowedLeverage));
 
-    // Normalize in UNDERLYING PRICE space before sizing. Leverage amplifies PnL on
-    // margin; it must not divide the SL/TP trigger distances.
-    const preTradeExits = normalizeFuturesExitLevels({
-      side: opportunity.side,
-      entry: opportunity.entry,
-      stopLoss: opportunity.stopLoss,
-      takeProfit: opportunity.takeProfit,
-      tp2: opportunity.tp2,
-      tp3: opportunity.tp3,
-      minStopPricePct: settings.cryptoMinStopPricePct,
-      minTakeProfitPricePct: settings.cryptoMinTakeProfitPricePct,
-      leverage: requestedEffectiveLeverage,
-    });
-
+    // The stop price is the V33.5 structural invalidation level. Leverage affects
+    // notional/margin PnL only; it never divides or multiplies the trigger price.
     const sizing = calculateCryptoSizing({
       futuresBalance,
       marginPctPerTrade: settings.cryptoMarginPctPerTrade,
       requestedLeverage: settings.cryptoRequestedLeverage,
       maxAllowedLeverage,
       entryPrice: opportunity.entry,
-      stopLoss: preTradeExits.stopLoss,
+      stopLoss: opportunity.stopLoss,
       maxLossPctPerTrade: settings.cryptoMaxLossPctPerTrade,
     });
 
@@ -114,10 +100,10 @@ export class CryptoExecutionService {
       confidence: opportunity.confidence,
       rollingWinRate: opportunity.rollingWinRate,
       entryPrice: opportunity.entry,
-      stopLoss: preTradeExits.stopLoss,
-      takeProfit: preTradeExits.takeProfit,
-      tp2: preTradeExits.tp2,
-      tp3: preTradeExits.tp3,
+      stopLoss: opportunity.stopLoss,
+      takeProfit: opportunity.takeProfit,
+      tp2: opportunity.tp2,
+      tp3: opportunity.tp3,
       leverage: sizing.effectiveLeverage,
       marginUsed: marginRequired,
       notional: normalized.notional,
@@ -135,7 +121,8 @@ export class CryptoExecutionService {
         score: opportunity.score,
         executionMode: settings.appMode,
         risk: sizing,
-        futuresExitProfileAtSignal: preTradeExits,
+        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
+        exitDisplayAtSignal: exitDisplay(opportunity.side, opportunity.entry, opportunity.stopLoss, opportunity.takeProfit, sizing.effectiveLeverage),
         exposure: {
           activeAllocatedMargin,
           marginRequired,
@@ -158,28 +145,13 @@ export class CryptoExecutionService {
       const orderId = String(order.orderId ?? order.clientOrderId ?? order.paper ?? `ORDER-${Date.now()}`);
       const fillPrice = Number(order.avgPrice || order.price || opportunity.entry) || opportunity.entry;
 
-      // Re-check the distance from the ACTUAL market fill. This prevents an entry
-      // that moved between scan and fill from inheriting a TP/SL only a few ticks away.
-      const fillExits = normalizeFuturesExitLevels({
-        side: opportunity.side,
-        entry: fillPrice,
-        stopLoss: preTradeExits.stopLoss,
-        takeProfit: preTradeExits.takeProfit,
-        tp2: preTradeExits.tp2,
-        tp3: preTradeExits.tp3,
-        minStopPricePct: settings.cryptoMinStopPricePct,
-        minTakeProfitPricePct: settings.cryptoMinTakeProfitPricePct,
-        leverage,
-      });
-
+      // Preserve the exact structural levels produced by the freshly revalidated signal.
+      // Rewriting them after fill changes the strategy. The display below recalculates
+      // the actual price distance/ROE from the fill so the UI remains truthful.
       this.repository.patchTrade(id, {
         brokerOrderId: orderId,
         leverage,
         entryPrice: fillPrice,
-        stopLoss: fillExits.stopLoss,
-        takeProfit: fillExits.takeProfit,
-        tp2: fillExits.tp2,
-        tp3: fillExits.tp3,
         openTime: Date.now(),
       });
       this.database.addTradeEvent(id, 'ENTRY_FILLED', {
@@ -188,7 +160,8 @@ export class CryptoExecutionService {
         leverage,
         fillPrice,
         executionMode: settings.appMode,
-        futuresExitProfile: fillExits,
+        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
+        exitDisplayAtFill: exitDisplay(opportunity.side, fillPrice, opportunity.stopLoss, opportunity.takeProfit, leverage),
       });
 
       const exitSide: TradeSide = opportunity.side === 'BUY' ? 'SELL' : 'BUY';
@@ -200,14 +173,14 @@ export class CryptoExecutionService {
           opportunity.symbol,
           exitSide,
           'STOP_MARKET',
-          fillExits.stopLoss,
+          opportunity.stopLoss,
           stopClientId,
         ),
         this.binance.createCloseAllConditional(
           opportunity.symbol,
           exitSide,
           'TAKE_PROFIT_MARKET',
-          fillExits.takeProfit,
+          opportunity.takeProfit,
           tpClientId,
         ),
       ]);
@@ -235,17 +208,8 @@ export class CryptoExecutionService {
         state: 'OPEN',
         leverage,
         entryPrice: fillPrice,
-        stopLoss: fillExits.stopLoss,
-        takeProfit: fillExits.takeProfit,
-        tp2: fillExits.tp2,
-        tp3: fillExits.tp3,
         brokerOrderId: orderId,
         openTime,
-        metadata: {
-          ...(reserved.metadata ?? {}),
-          futuresExitProfileAtSignal: preTradeExits,
-          futuresExitProfileAtFill: fillExits,
-        },
       });
       this.database.addTradeEvent(id, 'TRADE_OPENED', {
         brokerOrderId: orderId,
@@ -254,12 +218,8 @@ export class CryptoExecutionService {
         stopClientId,
         tpClientId,
         executionMode: settings.appMode,
-        stopLoss: fillExits.stopLoss,
-        takeProfit: fillExits.takeProfit,
-        stopPricePct: fillExits.stopPricePct,
-        tp1PricePct: fillExits.tp1PricePct,
-        stopMarginRoiPct: fillExits.stopMarginRoiPct,
-        tp1MarginRoiPct: fillExits.tp1MarginRoiPct,
+        stopLoss: opportunity.stopLoss,
+        takeProfit: opportunity.takeProfit,
       });
 
       const opened = this.database.getActiveTrades('BINANCE').find((trade) => trade.id === id);
@@ -328,4 +288,21 @@ export class CryptoExecutionService {
 function clientAlgoId(prefix: string, tradeId: string): string {
   const clean = tradeId.replace(/[^A-Za-z0-9_-]/g, '').slice(-20);
   return `V34-${prefix}-${clean}-${Date.now().toString().slice(-6)}`.slice(0, 36);
+}
+
+function exitDisplay(side: TradeSide, entry: number, stopLoss: number, takeProfit: number, leverage: number) {
+  const lev = Math.max(1, Number(leverage || 1));
+  const slPricePct = entry > 0
+    ? Math.max(0, (side === 'BUY' ? entry - stopLoss : stopLoss - entry) / entry * 100)
+    : 0;
+  const tpPricePct = entry > 0
+    ? Math.max(0, (side === 'BUY' ? takeProfit - entry : entry - takeProfit) / entry * 100)
+    : 0;
+  return {
+    slPricePct,
+    tpPricePct,
+    slMarginRoePct: slPricePct * lev,
+    tpMarginRoePct: tpPricePct * lev,
+    leverage: lev,
+  };
 }
