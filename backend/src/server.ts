@@ -8,6 +8,7 @@ import { TradingDatabase } from './database.js';
 import { ForexExecutionService } from './forexExecution.js';
 import { calculateMetrics, metricsByStrategy, metricsBySymbol } from './metrics.js';
 import { Mt5BridgeClient } from './mt5.js';
+import { PositionReconciler } from './reconciler.js';
 import { TradingRepository } from './repositories.js';
 import { selectCryptoOpportunities, selectForexOpportunities } from './selection.js';
 import { TelegramService } from './telegram.js';
@@ -27,6 +28,7 @@ const binance = new BinanceUsdmClient(getSettings);
 const mt5 = new Mt5BridgeClient(getSettings);
 const cryptoExecution = new CryptoExecutionService(database, repository, binance, telegram, getSettings);
 const forexExecution = new ForexExecutionService(database, repository, mt5, telegram, getSettings);
+const reconciler = new PositionReconciler(database, repository, binance, mt5, telegram, getSettings);
 
 const opportunitySchema = z.object({
   id: z.string().min(1),
@@ -55,7 +57,6 @@ const settingsPatchSchema = z.object({
   appMode: z.enum(['PAPER', 'TESTNET', 'REAL']).optional(),
   engineEnabled: z.boolean().optional(),
   cryptoEnabled: z.boolean().optional(),
-  // Hard cap from the product rule: never more than 10 simultaneous Binance coins.
   maxConcurrentCryptoTrades: z.number().int().min(1).max(10).optional(),
   cryptoMarginPctPerTrade: z.number().positive().max(100).optional(),
   cryptoRequestedLeverage: z.number().int().min(1).max(125).optional(),
@@ -162,8 +163,17 @@ app.post('/api/emergency-stop', (_req, res) => {
     VALUES('emergencyStop', 'true', ?)
     ON CONFLICT(key) DO UPDATE SET value='true', updated_at=excluded.updated_at
   `).run(Date.now());
-  void telegram.alert('EMERGENCY STOP', 'Nuevas entradas bloqueadas inmediatamente. El cierre masivo de posiciones se implementará/validará por broker antes de habilitar REAL.').catch(() => undefined);
+  void telegram.alert('EMERGENCY STOP', 'Nuevas entradas bloqueadas inmediatamente. Las posiciones existentes conservan SL/TP.').catch(() => undefined);
   res.json({ ok: true, engineEnabled: false, emergencyStop: true });
+});
+
+app.post('/api/reconcile', async (_req, res) => {
+  try {
+    await reconciler.runOnce();
+    res.json({ ok: true, reconciledAt: Date.now() });
+  } catch (error) {
+    res.status(500).json({ error: errorMessage(error) });
+  }
 });
 
 app.post('/api/opportunities/ingest', async (req, res) => {
@@ -206,8 +216,6 @@ app.post('/api/opportunities/ingest', async (req, res) => {
         }
       }
 
-      // Forex deliberately stays sequential too. Retests can repeat the pair,
-      // while each trade receives its own MT5 ticket and signal fingerprint.
       for (const opportunity of selectedForex) {
         try {
           const trade = await forexExecution.execute(opportunity);
@@ -257,7 +265,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const reconciliationTimer = setInterval(() => {
+  void reconciler.runOnce().catch((error) => {
+    console.error('[V34] reconciliation error:', errorMessage(error));
+  });
+}, 10_000);
+reconciliationTimer.unref();
+
 app.listen(env.PORT, () => {
   console.log(`[V34] backend listening on http://127.0.0.1:${env.PORT}`);
   console.log(`[V34] mode=${getSettings().appMode} engine=${getSettings().engineEnabled ? 'ON' : 'OFF'}`);
+  void reconciler.runOnce().catch((error) => console.error('[V34] initial reconciliation error:', errorMessage(error)));
 });
