@@ -29,10 +29,10 @@ const envSchema = z.object({
   CRYPTO_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
   CRYPTO_MIN_WINRATE: z.coerce.number().min(0).max(100).default(75),
 
-  // Four pairs × two time-series requests × 96 cycles/day (15 min) ≈ 768 credits/day,
-  // which fits the current Twelve Data Basic 800/day allowance.
+  // Four pairs × two time-series requests × 72 cycles/day (20 min) ≈ 576 credits/day.
+  // This leaves useful headroom under the current Twelve Data Basic 800/day allowance.
   FOREX_SYMBOLS: z.string().default('EURUSD,GBPUSD,USDJPY,EURJPY'),
-  FOREX_SIGNAL_SCAN_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
+  FOREX_SIGNAL_SCAN_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).default(20),
   FOREX_SIGNALS_PER_CYCLE: z.coerce.number().int().min(1).max(20).default(4),
   FOREX_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
   FOREX_MIN_WINRATE: z.coerce.number().min(0).max(100).default(70),
