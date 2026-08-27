@@ -1,6 +1,7 @@
 import { Router, type Request } from 'express';
 import { z } from 'zod';
 import { BinanceUsdmClient } from './binance.js';
+import { ForexDataClient } from './forexData.js';
 import { IntegrationVault, normalizeWorkspaceId, type IntegrationProvider } from './integrationVault.js';
 import { Mt5BridgeClient } from './mt5.js';
 import { TelegramService } from './telegram.js';
@@ -28,10 +29,7 @@ export function createIntegrationRouter(
   router.put('/binance', async (req, res) => {
     try {
       const workspaceId = workspaceFor(req);
-      const body = z.object({
-        apiKey: z.string().min(8).max(512),
-        apiSecret: z.string().min(8).max(512),
-      }).parse(req.body);
+      const body = z.object({ apiKey: z.string().min(8).max(512), apiSecret: z.string().min(8).max(512) }).parse(req.body);
       vault.saveBinance(workspaceId, body);
       const test = await testBinance(vault, workspaceId, getSettings);
       res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
@@ -43,10 +41,7 @@ export function createIntegrationRouter(
   router.put('/telegram', async (req, res) => {
     try {
       const workspaceId = workspaceFor(req);
-      const body = z.object({
-        botToken: z.string().min(10).max(512),
-        chatId: z.string().min(1).max(128),
-      }).parse(req.body);
+      const body = z.object({ botToken: z.string().min(10).max(512), chatId: z.string().min(1).max(128) }).parse(req.body);
       vault.saveTelegram(workspaceId, body);
       const test = await testTelegram(vault, workspaceId);
       res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
@@ -55,13 +50,24 @@ export function createIntegrationRouter(
     }
   });
 
+  router.put('/twelve-data', async (req, res) => {
+    try {
+      const workspaceId = workspaceFor(req);
+      const body = z.object({ apiKey: z.string().min(8).max(512) }).parse(req.body);
+      vault.saveTwelveData(workspaceId, body);
+      const test = await testTwelveData(vault, workspaceId);
+      res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
+    } catch (error) {
+      res.status(400).json({ error: message(error) });
+    }
+  });
+
+  // Legacy MT5 connector kept for migration/backward compatibility. Linux individual
+  // runtime does not require or execute through MT5.
   router.put('/mt5', async (req, res) => {
     try {
       const workspaceId = workspaceFor(req);
-      const body = z.object({
-        bridgeUrl: z.string().url().max(1024),
-        bridgeToken: z.string().min(4).max(512),
-      }).parse(req.body);
+      const body = z.object({ bridgeUrl: z.string().url().max(1024), bridgeToken: z.string().min(4).max(512) }).parse(req.body);
       vault.saveMt5(workspaceId, body);
       const test = await testMt5(vault, workspaceId, getSettings);
       res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
@@ -78,14 +84,10 @@ export function createIntegrationRouter(
         ? await testBinance(vault, workspaceId, getSettings)
         : provider === 'TELEGRAM'
           ? await testTelegram(vault, workspaceId)
-          : await testMt5(vault, workspaceId, getSettings);
-      res.status(test.ok ? 200 : 400).json({
-        ok: test.ok,
-        workspaceId,
-        provider,
-        test,
-        integrations: vault.getStatus(workspaceId),
-      });
+          : provider === 'TWELVE_DATA'
+            ? await testTwelveData(vault, workspaceId)
+            : await testMt5(vault, workspaceId, getSettings);
+      res.status(test.ok ? 200 : 400).json({ ok: test.ok, workspaceId, provider, test, integrations: vault.getStatus(workspaceId) });
     } catch (error) {
       res.status(400).json({ error: message(error) });
     }
@@ -105,11 +107,7 @@ export function createIntegrationRouter(
   return router;
 }
 
-async function testBinance(
-  vault: IntegrationVault,
-  workspaceId: string,
-  getSettings: () => EngineSettings,
-): Promise<Record<string, unknown>> {
+async function testBinance(vault: IntegrationVault, workspaceId: string, getSettings: () => EngineSettings): Promise<Record<string, unknown>> {
   if (!vault.getBinance(workspaceId)) throw new Error('BINANCE_CREDENTIALS_NOT_CONFIGURED');
   const client = new BinanceUsdmClient(getSettings, () => vault.getBinance(workspaceId));
   try {
@@ -123,10 +121,7 @@ async function testBinance(
   }
 }
 
-async function testTelegram(
-  vault: IntegrationVault,
-  workspaceId: string,
-): Promise<Record<string, unknown>> {
+async function testTelegram(vault: IntegrationVault, workspaceId: string): Promise<Record<string, unknown>> {
   if (!vault.getTelegram(workspaceId)) throw new Error('TELEGRAM_CREDENTIALS_NOT_CONFIGURED');
   const telegram = new TelegramService(() => vault.getTelegram(workspaceId));
   try {
@@ -140,11 +135,21 @@ async function testTelegram(
   }
 }
 
-async function testMt5(
-  vault: IntegrationVault,
-  workspaceId: string,
-  getSettings: () => EngineSettings,
-): Promise<Record<string, unknown>> {
+async function testTwelveData(vault: IntegrationVault, workspaceId: string): Promise<Record<string, unknown>> {
+  if (!vault.getTwelveData(workspaceId)) throw new Error('TWELVE_DATA_API_KEY_NOT_CONFIGURED');
+  const client = new ForexDataClient(() => vault.getTwelveData(workspaceId));
+  try {
+    const result = await client.testConnection();
+    vault.markTest(workspaceId, 'TWELVE_DATA', true);
+    return result;
+  } catch (error) {
+    const detail = message(error);
+    vault.markTest(workspaceId, 'TWELVE_DATA', false, detail);
+    return { ok: false, error: detail };
+  }
+}
+
+async function testMt5(vault: IntegrationVault, workspaceId: string, getSettings: () => EngineSettings): Promise<Record<string, unknown>> {
   if (!vault.getMt5(workspaceId)) throw new Error('MT5_BRIDGE_NOT_CONFIGURED');
   const client = new Mt5BridgeClient(getSettings, () => vault.getMt5(workspaceId));
   try {
@@ -172,16 +177,12 @@ async function testMt5(
 }
 
 function providerFrom(value: string | undefined): IntegrationProvider {
-  const provider = String(value || '').toUpperCase();
-  if (provider !== 'BINANCE' && provider !== 'TELEGRAM' && provider !== 'MT5') {
-    throw new Error('UNKNOWN_INTEGRATION_PROVIDER');
-  }
-  return provider;
+  const provider = String(value || '').toUpperCase().replace('-', '_');
+  if (!['BINANCE', 'TELEGRAM', 'MT5', 'TWELVE_DATA'].includes(provider)) throw new Error('UNKNOWN_INTEGRATION_PROVIDER');
+  return provider as IntegrationProvider;
 }
 
 function message(error: unknown): string {
-  if (error instanceof z.ZodError) {
-    return error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
-  }
+  if (error instanceof z.ZodError) return error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
   return error instanceof Error ? error.message : String(error);
 }
