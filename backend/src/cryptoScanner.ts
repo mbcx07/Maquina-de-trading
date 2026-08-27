@@ -88,19 +88,10 @@ export class CryptoMarketScanner {
       const liquidity = liquidityPercentiles(symbols, tickerMap);
 
       this.saveState({
-        status: 'SCANNING',
-        strategy: 'V33.5_ORIGINAL_COMPAT',
-        qualification: 'PROFITABLE_ONLY',
-        startedAt,
-        total: symbols.length,
-        universeTotal: allSymbols.length,
-        liquidUniverse: liquidSymbols.length,
-        qualifiedUniverse: qualified.size,
-        qualifiedSymbols: [...qualified],
-        minQuoteVolume24h: 2_000_000,
-        scanned: 0,
-        opportunities: 0,
-        errors: 0,
+        status: 'SCANNING', strategy: 'V33.5_ORIGINAL_COMPAT', qualification: 'PROFITABLE_ONLY',
+        startedAt, total: symbols.length, universeTotal: allSymbols.length, liquidUniverse: liquidSymbols.length,
+        qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified], minQuoteVolume24h: 2_000_000,
+        scanned: 0, opportunities: 0, revalidated: 0, errors: 0,
       });
 
       const chunkSize = 4;
@@ -118,51 +109,55 @@ export class CryptoMarketScanner {
         }
 
         this.saveState({
-          status: 'SCANNING',
-          strategy: 'V33.5_ORIGINAL_COMPAT',
-          qualification: 'PROFITABLE_ONLY',
-          startedAt,
-          total: symbols.length,
-          universeTotal: allSymbols.length,
-          liquidUniverse: liquidSymbols.length,
-          qualifiedUniverse: qualified.size,
-          qualifiedSymbols: [...qualified],
-          scanned,
-          current: chunk.at(-1) ?? null,
-          opportunities: opportunities.length,
-          errors,
+          status: 'SCANNING', strategy: 'V33.5_ORIGINAL_COMPAT', qualification: 'PROFITABLE_ONLY',
+          startedAt, total: symbols.length, universeTotal: allSymbols.length, liquidUniverse: liquidSymbols.length,
+          qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified], scanned,
+          current: chunk.at(-1) ?? null, opportunities: opportunities.length, revalidated: 0, errors,
         });
 
         if (i + chunkSize < symbols.length) await sleep(850);
       }
 
-      const result = await this.orchestrator.process(opportunities, true);
+      // The full-market scan can take long enough for an M1 setup to become stale.
+      // Preserve ranking, but re-run the exact v33.5 signal on fresh 100xM1/210xM15
+      // immediately before handing a candidate to execution. A setup that has left
+      // its pullback/trend zone simply disappears instead of opening and micro-closing.
+      const revalidationPool = [...opportunities]
+        .sort((a, b) => b.score - a.score || b.confidence - a.confidence)
+        .slice(0, Math.max(20, Math.min(40, this.getSettings().maxConcurrentCryptoTrades * 4)));
+      const freshOpportunities: Opportunity[] = [];
+      for (const original of revalidationPool) {
+        try {
+          const fresh = await this.scanSymbol(original.symbol, liquidity.get(original.symbol) ?? 0);
+          if (!fresh) continue;
+          fresh.metadata = {
+            ...(fresh.metadata ?? {}),
+            firstDetectedAt: original.createdAt,
+            firstDetectedEntry: original.entry,
+            revalidatedAt: Date.now(),
+            executionRevalidation: true,
+          };
+          freshOpportunities.push(fresh);
+        } catch {
+          errors++;
+        }
+      }
+
+      const result = await this.orchestrator.process(freshOpportunities, true);
       this.saveState({
-        status: 'IDLE',
-        strategy: 'V33.5_ORIGINAL_COMPAT',
-        qualification: 'PROFITABLE_ONLY',
-        startedAt,
-        completedAt: Date.now(),
-        total: symbols.length,
-        universeTotal: allSymbols.length,
-        liquidUniverse: liquidSymbols.length,
-        qualifiedUniverse: qualified.size,
-        qualifiedSymbols: [...qualified],
-        scanned,
-        opportunities: opportunities.length,
+        status: 'IDLE', strategy: 'V33.5_ORIGINAL_COMPAT', qualification: 'PROFITABLE_ONLY',
+        startedAt, completedAt: Date.now(), total: symbols.length, universeTotal: allSymbols.length,
+        liquidUniverse: liquidSymbols.length, qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified],
+        scanned, opportunities: opportunities.length, revalidated: freshOpportunities.length,
+        staleRejected: Math.max(0, revalidationPool.length - freshOpportunities.length),
         selected: result.selected.crypto.length,
         executed: result.executionResults.filter((item) => item.broker === 'BINANCE' && item.ok === true).length,
         errors,
       });
     } catch (error) {
       this.saveState({
-        status: 'ERROR',
-        strategy: 'V33.5_ORIGINAL_COMPAT',
-        startedAt,
-        completedAt: Date.now(),
-        scanned,
-        opportunities: opportunities.length,
-        errors: errors + 1,
+        status: 'ERROR', strategy: 'V33.5_ORIGINAL_COMPAT', startedAt, completedAt: Date.now(),
+        scanned, opportunities: opportunities.length, errors: errors + 1,
         error: error instanceof Error ? error.message : String(error),
       });
       throw error;
@@ -173,11 +168,8 @@ export class CryptoMarketScanner {
 
   private async loop(): Promise<void> {
     if (this.stopped) return;
-    try {
-      await this.runCycle();
-    } catch (error) {
-      console.error('[V34] crypto scanner:', error instanceof Error ? error.message : error);
-    }
+    try { await this.runCycle(); }
+    catch (error) { console.error('[V34] crypto scanner:', error instanceof Error ? error.message : error); }
 
     if (!this.stopped) {
       this.timer = setTimeout(() => void this.loop(), 15_000);
@@ -186,7 +178,6 @@ export class CryptoMarketScanner {
   }
 
   private async scanSymbol(symbol: string, liquidityScore: number): Promise<Opportunity | null> {
-    // Individual trend: every symbol gets its own exact v33.5 100xM1 + 210xM15 history.
     const { ltf, htf } = await this.market.getDualKlines(symbol);
     if (ltf.length < 100 || htf.length < 210) return null;
 
@@ -214,48 +205,28 @@ export class CryptoMarketScanner {
       id: `OP-BN-${fingerprint.slice(0, 24)}`,
       signalId: `SIG-BN-${fingerprint.slice(0, 24)}`,
       signalFingerprint: fingerprint,
-      broker: 'BINANCE',
-      symbol,
-      side: signal.side,
-      timeframe: '1m/15m',
-      strategy: signal.strategy,
-      confidence: signal.confidence,
-      rollingWinRate,
-      expectancy: backtest.expectancyPct,
-      score,
-      entry: signal.entry,
-      stopLoss: signal.stopLoss,
-      takeProfit: signal.takeProfit,
-      tp2: signal.tp2,
-      tp3: signal.tp3,
+      broker: 'BINANCE', symbol, side: signal.side, timeframe: '1m/15m', strategy: signal.strategy,
+      confidence: signal.confidence, rollingWinRate, expectancy: backtest.expectancyPct, score,
+      entry: signal.entry, stopLoss: signal.stopLoss, takeProfit: signal.takeProfit, tp2: signal.tp2, tp3: signal.tp3,
       createdAt: Date.now(),
       metadata: {
-        reason: signal.reason,
-        atr: signal.atr,
-        backtest,
-        liquidityScore,
+        reason: signal.reason, atr: signal.atr, backtest, liquidityScore,
         rollingWinRateSource: backtest.tradesEvaluated === 0 ? 'SIGNAL_CONFIDENCE_NO_HISTORY' : 'ROLLING_BACKTEST_V335',
-        strategyCompatibility: 'V33.5_ORIGINAL',
-        trendSource: `${symbol}:M15_EMA20_50_200`,
-        decisionWindows: { m1: 100, m15: 210 },
-        candleTime,
+        strategyCompatibility: 'V33.5_ORIGINAL', trendSource: `${symbol}:M15_EMA20_50_200`,
+        decisionWindows: { m1: 100, m15: 210 }, candleTime,
       },
     };
   }
 
   private saveState(value: Record<string, unknown>): void {
     this.database.db.prepare(`
-      INSERT INTO engine_state(key, value, updated_at)
-      VALUES('cryptoScanner', ?, ?)
+      INSERT INTO engine_state(key, value, updated_at) VALUES('cryptoScanner', ?, ?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
     `).run(JSON.stringify(value), Date.now());
   }
 }
 
-function liquidityPercentiles(
-  symbols: string[],
-  tickerMap: Map<string, { quoteVolume: number }>,
-): Map<string, number> {
+function liquidityPercentiles(symbols: string[], tickerMap: Map<string, { quoteVolume: number }>): Map<string, number> {
   const sorted = symbols
     .map((symbol) => ({ symbol, volume: Math.max(0, tickerMap.get(symbol)?.quoteVolume ?? 0) }))
     .sort((a, b) => a.volume - b.volume);
@@ -265,14 +236,6 @@ function liquidityPercentiles(
   return result;
 }
 
-function sha256(value: string): string {
-  return crypto.createHash('sha256').update(value).digest('hex');
-}
-
-function roundKey(value: number): string {
-  return Number(value.toPrecision(10)).toString();
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+function sha256(value: string): string { return crypto.createHash('sha256').update(value).digest('hex'); }
+function roundKey(value: number): string { return Number(value.toPrecision(10)).toString(); }
+function sleep(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
