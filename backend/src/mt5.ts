@@ -36,6 +36,40 @@ export interface Mt5Position {
   timeMsc: number;
 }
 
+export interface Mt5Deal {
+  ticket: number;
+  order: number;
+  time: number;
+  timeMsc: number;
+  type: number;
+  entry: number;
+  magic: number;
+  positionId: number;
+  reason: number;
+  volume: number;
+  price: number;
+  commission: number;
+  swap: number;
+  profit: number;
+  fee: number;
+  symbol: string;
+  comment: string;
+}
+
+export interface Mt5PositionHistory {
+  ticket: number;
+  deals: Mt5Deal[];
+  summary: {
+    exitPrice: number | null;
+    closeTime: number | null;
+    profit: number;
+    commission: number;
+    swap: number;
+    fee: number;
+    closeReason: string;
+  };
+}
+
 export interface Mt5SizeResult {
   symbol: string;
   mode: 'RISK_TO_SL' | 'MARGIN_PERCENT';
@@ -81,6 +115,10 @@ export class Mt5BridgeClient {
 
   positions(symbol?: string): Promise<Mt5Position[]> {
     return this.request(`/positions${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`);
+  }
+
+  history(positionTicket: number): Promise<Mt5PositionHistory> {
+    return this.request(`/history/${encodeURIComponent(String(positionTicket))}`);
   }
 
   calculateSize(input: {
