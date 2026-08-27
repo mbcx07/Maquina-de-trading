@@ -19,8 +19,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
       - run: npm install
       - run: npm run typecheck
       - run: npm run selftest
@@ -32,8 +30,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: package-lock.json
       - run: npm install
       - run: npm run build
 
