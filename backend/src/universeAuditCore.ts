@@ -44,26 +44,31 @@ export interface AuditRules {
   startTime: number;
   endTime: number;
   scanStepMinutes: number;
+  maxHoldMinutes: number;
   roundTripCostPct: number;
   minRollingWinRate: number;
   minSignalConfidence: number;
   minTrades: number;
   minProfitFactor: number;
   minOosTrades: number;
-  exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS';
+  exitModel: 'V33.5_STRUCTURAL_H45';
 }
 
 export const defaultAuditRules = (startTime: number, endTime: number): AuditRules => ({
   startTime,
   endTime,
-  scanStepMinutes: 5,
+  // The original rolling evaluator advances densely and only watches a setup for
+  // roughly 45 M1 candles. The previous universe audit scanned every 5 minutes and
+  // could keep a symbol busy for days until TP/SL, suppressing most valid trades.
+  scanStepMinutes: 2,
+  maxHoldMinutes: 45,
   roundTripCostPct: 0.12,
   minRollingWinRate: 75,
   minSignalConfidence: 75,
   minTrades: 5,
   minProfitFactor: 1.10,
   minOosTrades: 2,
-  exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
+  exitModel: 'V33.5_STRUCTURAL_H45',
 });
 
 export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], rules: AuditRules): SymbolAuditResult {
@@ -81,7 +86,6 @@ export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], ru
     const htfEnd = upperBoundTime(h, current.time);
     if (htfEnd < 210) continue;
 
-    // Exact live decision windows used by the original v33.5 scanner.
     const ltfWindow = l.slice(i - 99, i + 1);
     const htfWindow = h.slice(htfEnd - 210, htfEnd);
     if (ltfWindow.length !== 100 || htfWindow.length !== 210) continue;
@@ -95,9 +99,17 @@ export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], ru
       : rolling.winRate >= rules.minRollingWinRate && signal.confidence >= rules.minSignalConfidence;
     if (!passes) continue;
 
-    // IMPORTANT: Futures leverage changes margin ROE and PnL sizing, not the price
-    // level at which the original strategy says structure/ATR is invalidated or TP1 is hit.
-    const resolved = resolve(signal.side, signal.entry, signal.stopLoss, signal.takeProfit, l, i);
+    // Leverage changes margin ROE/PnL sizing, never the underlying SL/TP trigger price.
+    // Resolve only inside the same short horizon used by the original rolling test.
+    const resolved = resolve(
+      signal.side,
+      signal.entry,
+      signal.stopLoss,
+      signal.takeProfit,
+      l,
+      i,
+      rules.maxHoldMinutes,
+    );
     if (!resolved) continue;
     busyUntil = resolved.exitTime;
 
@@ -141,12 +153,15 @@ function resolve(
   takeProfit: number,
   candles: Candle[],
   entryIndex: number,
+  maxHoldMinutes: number,
 ): { exit: number; exitTime: number; reason: 'TP' | 'SL' | 'END' } | null {
-  for (let i = entryIndex + 1; i < candles.length; i++) {
+  const lastIndex = Math.min(candles.length - 1, entryIndex + Math.max(1, Math.round(maxHoldMinutes)));
+  for (let i = entryIndex + 1; i <= lastIndex; i++) {
     const candle = candles[i];
     if (side === 'BUY') {
       const sl = candle.low <= stopLoss;
       const tp = candle.high >= takeProfit;
+      // Conservative same-candle policy: SL first when OHLC cannot prove order.
       if (sl) return { exit: stopLoss, exitTime: candle.time, reason: 'SL' };
       if (tp) return { exit: takeProfit, exitTime: candle.time, reason: 'TP' };
     } else {
@@ -156,8 +171,9 @@ function resolve(
       if (tp) return { exit: takeProfit, exitTime: candle.time, reason: 'TP' };
     }
   }
-  const last = candles.at(-1);
-  return last ? { exit: last.close, exitTime: last.time, reason: 'END' } : null;
+
+  const expiry = candles[lastIndex];
+  return expiry ? { exit: expiry.close, exitTime: expiry.time, reason: 'END' } : null;
 }
 
 function metricsFor(trades: AuditTrade[]): AuditMetrics {
