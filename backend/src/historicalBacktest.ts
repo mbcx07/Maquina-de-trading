@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { analyzeStructureStrategy, type Candle } from './analysis.js';
+import { analyzeStructureStrategyV335 } from './analysisV335.js';
 import { BinanceMarketDataClient } from './binanceMarket.js';
 import { TradingDatabase } from './database.js';
 import { Mt5BridgeClient } from './mt5.js';
@@ -225,21 +226,30 @@ function generateCandidates(
   const sortedLtf = [...ltf].sort((a, b) => a.time - b.time);
   const sortedHtf = [...htf].sort((a, b) => a.time - b.time);
   const output: HistoricalCandidate[] = [];
-  const stepBars = Math.max(1, Math.round(request.scanStepMinutes));
-  const maxHoldBars = Math.max(1, Math.round(request.maxHoldMinutes));
+  const ltfMinutes = request.broker === 'BINANCE' ? 5 : 1;
+  const stepBars = Math.max(1, Math.ceil(request.scanStepMinutes / ltfMinutes));
+  const maxHoldBars = Math.max(1, Math.ceil(request.maxHoldMinutes / ltfMinutes));
   let zoneActive = false;
   let cryptoBusyUntil = 0;
+  const startIndex = request.broker === 'BINANCE' ? 99 : 60;
 
-  for (let i = 60; i < sortedLtf.length - 2; i += stepBars) {
+  for (let i = startIndex; i < sortedLtf.length - 2; i += stepBars) {
     const current = sortedLtf[i];
     if (current.time < request.startTime || current.time > request.endTime) continue;
     if (request.broker === 'BINANCE' && current.time < cryptoBusyUntil) continue;
 
     const htfEnd = upperBoundTime(sortedHtf, current.time);
-    if (htfEnd < 200) continue;
-    const ltfWindow = sortedLtf.slice(Math.max(0, i - 259), i + 1);
-    const htfWindow = sortedHtf.slice(Math.max(0, htfEnd - 260), htfEnd);
-    const signal = analyzeStructureStrategy(ltfWindow, htfWindow, symbol);
+    if (request.broker === 'BINANCE' ? htfEnd < 210 : htfEnd < 200) continue;
+
+    const ltfWindow = request.broker === 'BINANCE'
+      ? sortedLtf.slice(i - 99, i + 1)
+      : sortedLtf.slice(Math.max(0, i - 259), i + 1);
+    const htfWindow = request.broker === 'BINANCE'
+      ? sortedHtf.slice(htfEnd - 210, htfEnd)
+      : sortedHtf.slice(Math.max(0, htfEnd - 260), htfEnd);
+    const signal = request.broker === 'BINANCE'
+      ? analyzeStructureStrategyV335(ltfWindow, htfWindow, symbol)
+      : analyzeStructureStrategy(ltfWindow, htfWindow, symbol);
 
     if (!signal) {
       zoneActive = false;
