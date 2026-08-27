@@ -1,296 +1,423 @@
-
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Portfolio, LogEntry, Trade, MarketType, Timeframe, StrategyResult, Candle, StrategyType } from './types';
-import { binanceService } from './services/binance';
-import { automationEngine } from './services/automation';
-import { marketService } from './services/marketData';
-import { INITIAL_CAPITAL, LEVERAGE as DEFAULT_LEVERAGE } from './constants';
-
-import LiveLog from './components/LiveLog';
-import QuantMetrics from './components/QuantMetrics';
-import TradeDetail from './components/TradeDetail';
-import TradeHistory from './components/TradeHistory';
-import StrategyLeaderboard from './components/StrategyLeaderboard';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { v34Api } from './services/v34Api';
 
 const App: React.FC = () => {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [engineActive, setEngineActive] = useState(false);
-  const [tradingMode, setTradingMode] = useState<'PAPER' | 'REAL'>('PAPER');
-  const [currentLeverage, setCurrentLeverage] = useState(DEFAULT_LEVERAGE);
-  const [leaderboard, setLeaderboard] = useState<StrategyResult[]>([]);
-  const [scanningSymbol, setScanningSymbol] = useState<string | null>(null);
-  const [isConnected, setIsConnected] = useState(false);
-  const [networkError, setNetworkError] = useState("");
-  const [activeNode, setActiveNode] = useState("APEX-V33.5");
-  
-  const processingSymbols = useRef<Set<string>>(new Set());
-  const tradesRef = useRef<Trade[]>([]);
-  const balanceRef = useRef<number>(INITIAL_CAPITAL);
+  const [state, setState] = useState<any>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [lastSync, setLastSync] = useState<number>(0);
 
-  const [portfolio, setPortfolio] = useState<Portfolio>({
-    futuresBalance: INITIAL_CAPITAL,
-    initialBalance: INITIAL_CAPITAL,
-    equity: INITIAL_CAPITAL,
-    totalPnl: 0,
-    trades: []
-  });
-
-  const addLog = useCallback((message: string, level: LogEntry['level'], category: LogEntry['category']) => {
-    setLogs(prev => [{ timestamp: Date.now(), level, message, category }, ...prev].slice(0, 50));
+  const refresh = useCallback(async () => {
+    try {
+      const next = await v34Api.getState();
+      setState(next);
+      setError('');
+      setLastSync(Date.now());
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    }
   }, []);
 
-  const syncState = useCallback(async () => {
-    if (tradingMode !== 'REAL') return;
+  useEffect(() => {
+    refresh();
+    const timer = setInterval(refresh, 5000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  const patchSettings = async (patch: Record<string, unknown>) => {
+    setBusy(true);
     try {
-      const bal = await binanceService.getAvailableBalance();
-      if (bal > 0) {
-        // Detectar caída masiva de balance (posible liquidación)
-        if (balanceRef.current > 0 && bal < balanceRef.current * 0.9) {
-            addLog("ALERTA: Caída de balance detectada. Reconciliando posiciones...", "ERROR", "RISK");
-        }
-        balanceRef.current = bal;
-        setPortfolio(prev => ({ ...prev, futuresBalance: bal, equity: bal }));
-        setIsConnected(true);
-      }
-
-      const realPositions = await binanceService.getOpenPositions();
-      const realSymbols = new Set(realPositions.map(p => p.symbol));
-
-      let updatedTrades = [...tradesRef.current];
-      let needsStateUpdate = false;
-      
-      // 1. Detectar posiciones cerradas externamente (Binance las quitó de PositionRisk)
-      for (const t of updatedTrades) {
-        if (t.status === 'OPEN' && t.isReal && !realSymbols.has(t.symbol)) {
-          needsStateUpdate = true;
-          try {
-            const history = await binanceService.getUserTrades(t.symbol);
-            const lastTrade = history[0];
-            t.status = 'CLOSED';
-            t.exitPrice = lastTrade ? parseFloat(lastTrade.price) : marketService.getLivePrice(t.symbol);
-            t.pnl = lastTrade ? parseFloat(lastTrade.realizedPnl) : 0;
-            t.exitTime = Date.now();
-            addLog(`SYNC: ${t.symbol} cerrada en Binance (SL/TP/LQ).`, "INFO", "EXECUTION");
-          } catch (e) {
-            t.status = 'CLOSED';
-            t.exitTime = Date.now();
-          }
-        }
-      }
-
-      // 2. Actualizar trades abiertos con datos en tiempo real de Binance
-      for (const p of realPositions) {
-        const existingIndex = updatedTrades.findIndex(t => t.symbol === p.symbol && t.status === 'OPEN');
-        
-        const realPnl = parseFloat(p.unrealizedProfit || p.unRealizedProfit || "0");
-        const realLev = parseInt(p.leverage || "1");
-        const realEntry = parseFloat(p.entryPrice || "0");
-        const realNotional = Math.abs(parseFloat(p.notional || "0"));
-        const posAmt = parseFloat(p.positionAmt);
-        
-        if (existingIndex !== -1) {
-          if (updatedTrades[existingIndex].pnl !== realPnl) needsStateUpdate = true;
-          updatedTrades[existingIndex].leverage = realLev;
-          updatedTrades[existingIndex].entryPrice = realEntry;
-          updatedTrades[existingIndex].amount = realNotional / (realLev || 1);
-          updatedTrades[existingIndex].pnl = realPnl;
-        } else {
-          // Adoptar posición que no estaba en la App
-          needsStateUpdate = true;
-          const adopted: Trade = {
-            id: `EXT-${p.symbol}-${Date.now()}`,
-            symbol: p.symbol, strategy: StrategyType.EXPERT_CONFLUENCE,
-            timeframe: Timeframe.M1, market: MarketType.FUTURES,
-            entryPrice: realEntry, amount: realNotional / (realLev || 1),
-            leverage: realLev, entryTime: Date.now(), status: 'OPEN',
-            pnl: realPnl, side: posAmt > 0 ? 'BUY' : 'SELL', isReal: true
-          };
-          updatedTrades.unshift(adopted);
-          addLog(`DETECTADO: Posición externa en ${p.symbol} sincronizada.`, "SUCCESS", "MARKET");
-        }
-      }
-
-      if (needsStateUpdate) {
-        tradesRef.current = updatedTrades;
-        setPortfolio(prev => ({ ...prev, trades: updatedTrades }));
-      }
-      setActiveNode(binanceService.activeProxyName);
+      await v34Api.patchSettings(patch);
+      await refresh();
     } catch (e: any) {
-      setNetworkError(e.message);
-    }
-  }, [tradingMode, addLog]);
-
-  const handleDecision = useCallback(async (decision: any) => {
-    if (processingSymbols.current.has(decision.symbol)) return;
-    processingSymbols.current.add(decision.symbol);
-
-    try {
-      const isReal = tradingMode === 'REAL';
-      let confirmedLeverage = currentLeverage;
-      let confirmedMargin = decision.margin;
-
-      if (isReal) {
-        addLog(`ORDEN: ${decision.symbol} enviando...`, "INFO", "EXECUTION");
-        confirmedLeverage = await binanceService.setLeverage(decision.symbol, currentLeverage);
-        
-        // Re-calcular margen con el apalancamiento real que aplicó Binance
-        confirmedMargin = decision.notional / confirmedLeverage;
-
-        const qty = binanceService.formatQuantity(decision.symbol, (decision.notional / decision.entry));
-        const side = decision.side === 'LONG' ? 'BUY' : 'SELL';
-        const res = await binanceService.createOrder(decision.symbol, side, qty);
-        
-        if (res.success) {
-          addLog(`OK: ${decision.symbol} @ ${confirmedLeverage}x`, "SUCCESS", "EXECUTION");
-          const exitSide = side === 'BUY' ? 'SELL' : 'BUY';
-          binanceService.setNativeExit(decision.symbol, exitSide, decision.sl, 'STOP_MARKET').catch(() => {});
-          binanceService.setNativeExit(decision.symbol, exitSide, decision.tp, 'TAKE_PROFIT_MARKET').catch(() => {});
-        } else throw new Error(res.error);
-      }
-
-      const newTrade: Trade = {
-        id: `T-${Date.now()}`,
-        symbol: decision.symbol, strategy: decision.strategy,
-        timeframe: Timeframe.M1, market: MarketType.FUTURES,
-        entryPrice: decision.entry, amount: confirmedMargin,
-        leverage: confirmedLeverage, entryTime: Date.now(),
-        status: 'OPEN', pnl: 0, side: decision.side === 'LONG' ? 'BUY' : 'SELL',
-        takeProfit: decision.tp, stopLoss: decision.sl, isReal
-      };
-
-      setPortfolio(prev => {
-        const updated = [newTrade, ...prev.trades];
-        tradesRef.current = updated;
-        return { ...prev, trades: updated };
-      });
-    } catch (e: any) {
-      addLog(`FALLO: ${decision.symbol} - ${e.message}`, "ERROR", "EXECUTION");
+      setError(e?.message || String(e));
     } finally {
-      processingSymbols.current.delete(decision.symbol);
-      setTimeout(syncState, 2000);
+      setBusy(false);
     }
-  }, [tradingMode, currentLeverage, addLog, syncState]);
+  };
 
-  const handleEvaluation = useCallback((result: StrategyResult) => {
-    setLeaderboard(prev => {
-      const idx = prev.findIndex(item => item.symbol === result.symbol && item.strategy === result.strategy);
-      if (idx !== -1) {
-        const updated = [...prev];
-        updated[idx] = result;
-        return updated.sort((a, b) => b.winRate - a.winRate);
-      }
-      return [result, ...prev].slice(0, 25).sort((a, b) => b.winRate - a.winRate);
-    });
-  }, []);
+  const engineAction = async (action: 'start' | 'pause' | 'stop') => {
+    setBusy(true);
+    try {
+      if (action === 'start') await v34Api.startEngine();
+      if (action === 'pause') await v34Api.pauseEngine();
+      if (action === 'stop') await v34Api.emergencyStop();
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
-  useEffect(() => {
-    const mainLoop = setInterval(() => {
-      if (engineActive) {
-        const openSymbols = tradesRef.current.filter(t => t.status === 'OPEN').map(t => t.symbol);
-        automationEngine.monitorAndScan(balanceRef.current, currentLeverage, openSymbols, handleDecision, handleEvaluation, setScanningSymbol, addLog);
-      }
-    }, 10000);
-    return () => clearInterval(mainLoop);
-  }, [engineActive, currentLeverage, handleDecision, handleEvaluation, addLog]);
+  const settings = state?.settings || {};
+  const activeCrypto = state?.active?.crypto || [];
+  const activeForex = state?.active?.forex || [];
+  const cryptoOpps = state?.opportunities?.crypto || [];
+  const forexOpps = state?.opportunities?.forex || [];
+  const cryptoMetrics = state?.metrics?.crypto || emptyMetrics;
+  const forexMetrics = state?.metrics?.forex || emptyMetrics;
+  const globalMetrics = state?.metrics?.global || emptyMetrics;
 
-  useEffect(() => {
-    const priceUpdater = setInterval(async () => {
-      try {
-        const prices = await binanceService.getAllPrices();
-        if (prices.size > 0) {
-          setIsConnected(true);
-          prices.forEach((p, s) => marketService.updateRealPrice(s, p));
-        }
-      } catch (e: any) {}
-    }, 5000);
-    return () => clearInterval(priceUpdater);
-  }, []);
+  const recentCrypto = useMemo(
+    () => (state?.recentTrades || []).filter((t: any) => t.broker === 'BINANCE').slice(0, 12),
+    [state],
+  );
+  const recentForex = useMemo(
+    () => (state?.recentTrades || []).filter((t: any) => t.broker === 'MT5').slice(0, 12),
+    [state],
+  );
+
+  if (!state) {
+    return (
+      <div className="min-h-screen bg-[#010409] text-slate-200 flex items-center justify-center font-mono">
+        <div className="text-center space-y-4">
+          <div className="w-16 h-16 mx-auto border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin" />
+          <p className="text-xs uppercase tracking-[0.35em] text-slate-500">Conectando V34 Backend</p>
+          {error && <p className="text-rose-400 text-xs max-w-xl">{error}</p>}
+        </div>
+      </div>
+    );
+  }
+
+  const binanceStatus = state?.brokerStatus?.binance || {};
+  const mt5Status = state?.brokerStatus?.mt5 || {};
+  const telegramStatus = state?.brokerStatus?.telegram || {};
 
   return (
-    <div className="min-h-screen bg-[#010409] text-slate-200 p-4 font-mono">
-      <div className="max-w-[1500px] mx-auto space-y-4">
-        <div className="bg-[#0d1117] border border-slate-800 rounded-3xl p-6 flex flex-wrap justify-between items-center shadow-2xl gap-6">
-          <div className="flex items-center gap-6">
-            <div className={`w-3 h-3 rounded-full ${engineActive ? 'bg-indigo-500 animate-pulse' : 'bg-slate-700'}`}></div>
-            <div>
-              <h1 className="text-2xl font-black text-white italic uppercase tracking-tighter">QUANTUM<span className="text-indigo-500">SNIPER</span> v33.5</h1>
-              <div className="flex flex-col mt-1">
-                <div className="flex items-center gap-2">
-                  <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : 'bg-rose-500 animate-ping'}`}></span>
-                  <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">
-                    {isConnected ? `NODE: ${activeNode}` : 'CONNECTING...'}
-                  </p>
+    <div className="min-h-screen bg-[#010409] text-slate-200 p-3 md:p-5 font-mono">
+      <div className="max-w-[1800px] mx-auto space-y-4">
+        <header className="bg-[#0d1117] border border-slate-800 rounded-3xl p-4 md:p-6 shadow-2xl">
+          <div className="flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-5">
+            <div className="flex items-center gap-4">
+              <StatusDot on={Boolean(settings.engineEnabled)} />
+              <div>
+                <h1 className="text-2xl md:text-3xl font-black italic tracking-tighter uppercase text-white">
+                  QUANTUM<span className="text-indigo-500">DUAL</span> V34
+                </h1>
+                <div className="flex flex-wrap gap-3 mt-2 text-[9px] font-black uppercase tracking-widest text-slate-500">
+                  <StatusLabel label="BINANCE" ok={settings.appMode === 'PAPER' || Boolean(binanceStatus.connected)} configured={binanceStatus.configured} />
+                  <StatusLabel label="MT5" ok={settings.appMode === 'PAPER' || Boolean(mt5Status.connected)} configured={mt5Status.configured} />
+                  <StatusLabel label="TELEGRAM" ok={Boolean(telegramStatus.configured)} configured={telegramStatus.configured} />
+                  <span>DB: PERSISTENT</span>
+                  <span>SYNC: {lastSync ? new Date(lastSync).toLocaleTimeString() : '—'}</span>
                 </div>
               </div>
             </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-8">
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[8px] font-black text-indigo-500 uppercase tracking-[0.2em] text-center">LEV CONFIG</span>
-              <div className="flex bg-black/40 p-1.5 rounded-2xl border border-slate-800">
-                  {[20, 50, 75, 100, 125].map(lv => (
-                    <button key={lv} onClick={() => setCurrentLeverage(lv)} className={`w-12 h-9 rounded-xl text-[10px] font-black transition-all border ${currentLeverage === lv ? 'bg-indigo-600 border-indigo-400 text-white shadow-[0_0_15px_rgba(79,70,229,0.4)]' : 'border-transparent text-slate-600'}`}>{lv}x</button>
-                  ))}
-               </div>
-            </div>
-            <div className="flex bg-black/60 p-1.5 rounded-2xl border border-slate-700">
-               <button onClick={() => setTradingMode('PAPER')} className={`px-4 py-2 rounded-xl text-[9px] font-black ${tradingMode === 'PAPER' ? 'bg-slate-800 text-white' : 'text-slate-600'}`}>PAPER</button>
-               <button onClick={() => setTradingMode('REAL')} className={`px-4 py-2 rounded-xl text-[9px] font-black ${tradingMode === 'REAL' ? 'bg-amber-500 text-black shadow-lg' : 'text-slate-600'}`}>REAL</button>
-            </div>
-            <button onClick={() => setEngineActive(!engineActive)} className={`px-12 py-4 rounded-2xl font-black uppercase text-xs transition-all ${engineActive ? 'bg-rose-600 shadow-[0_0_25px_rgba(225,29,72,0.4)]' : 'bg-indigo-600 shadow-[0_0_25px_rgba(79,70,229,0.4)]'} text-white`}>
-              {engineActive ? 'HALT' : 'ENGAGE'}
-            </button>
-          </div>
-        </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
-          <QuantMetrics portfolio={portfolio} />
-          <div className="lg:col-span-2 bg-[#0d1117] border border-slate-800 rounded-[2.5rem] p-8 flex flex-col items-center justify-center min-h-[450px]">
-             {engineActive && scanningSymbol ? (
-               <div className="text-center space-y-8 animate-in fade-in zoom-in duration-700">
-                  <div className="w-32 h-32 border-4 border-indigo-500/10 border-t-indigo-500 rounded-full animate-spin"></div>
-                  <h2 className="text-2xl font-black text-white italic uppercase tracking-tighter">Scanning...</h2>
-                  <p className="text-sm text-indigo-400 font-black tracking-[0.4em] bg-indigo-500/10 px-6 py-2 rounded-full border border-indigo-500/20">{scanningSymbol}</p>
-               </div>
-             ) : (
-               <div className="text-center space-y-8">
-                 <div className="w-24 h-24 border-4 border-indigo-500/10 border-t-indigo-500 rounded-full flex items-center justify-center text-indigo-500 font-black text-2xl italic">33.5</div>
-                 <h2 className="text-3xl font-black text-white italic uppercase tracking-widest">SRE ENGINE</h2>
-                 <p className="text-[10px] text-slate-500 font-black uppercase tracking-[0.5em] leading-relaxed">Auto-Sync: ENABLED<br/>Anti-Liquidation: ACTIVE</p>
-               </div>
-             )}
-          </div>
-          <StrategyLeaderboard strategies={leaderboard} />
-        </div>
-
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-          <div className="xl:col-span-2 space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-               {portfolio.trades.filter(t => t.status === 'OPEN').map(t => (
-                 <TradeDetail key={t.id} trade={t} onClose={async (tr, pr) => {
-                    try {
-                        if (tradingMode === 'REAL') {
-                            const qty = binanceService.formatQuantity(tr.symbol, (tr.amount * tr.leverage / tr.entryPrice));
-                            await binanceService.closePosition(tr.symbol, tr.side, qty);
-                            addLog(`CERRADO: ${tr.symbol}`, "SUCCESS", "EXECUTION");
-                        } else {
-                            setPortfolio(prev => ({
-                                ...prev,
-                                trades: prev.trades.map(item => item.id === tr.id ? { ...item, status: 'CLOSED', exitPrice: pr, exitTime: Date.now(), pnl: (pr - item.entryPrice) * (item.amount * item.leverage / item.entryPrice) * (item.side === 'BUY' ? 1 : -1) } : item)
-                            }));
-                        }
-                        setTimeout(syncState, 2000);
-                    } catch (e: any) { addLog(`ERROR CIERRE: ${e.message}`, "ERROR", "EXECUTION"); }
-                 }} />
-               ))}
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={settings.appMode}
+                disabled={busy || settings.engineEnabled}
+                onChange={(e) => patchSettings({ appMode: e.target.value })}
+                className="bg-black/60 border border-slate-700 rounded-xl px-4 py-3 text-[10px] font-black"
+              >
+                <option value="PAPER">PAPER</option>
+                <option value="TESTNET">TESTNET / DEMO</option>
+                <option value="REAL">REAL</option>
+              </select>
+              <button
+                disabled={busy}
+                onClick={() => engineAction(settings.engineEnabled ? 'pause' : 'start')}
+                className={`px-6 py-3 rounded-xl text-[10px] font-black uppercase transition-all ${settings.engineEnabled ? 'bg-amber-500 text-black' : 'bg-indigo-600 text-white shadow-[0_0_22px_rgba(79,70,229,.35)]'}`}
+              >
+                {settings.engineEnabled ? 'PAUSE ENGINE' : 'START ENGINE'}
+              </button>
+              <button
+                disabled={busy}
+                onClick={() => engineAction('stop')}
+                className="px-5 py-3 rounded-xl text-[10px] font-black uppercase bg-rose-700 text-white border border-rose-500/50"
+              >
+                EMERGENCY STOP
+              </button>
             </div>
-            <TradeHistory trades={portfolio.trades} />
           </div>
-          <div className="xl:col-span-1"><LiveLog logs={logs} /></div>
-        </div>
+          {error && <div className="mt-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 px-4 py-3 text-[10px]">{error}</div>}
+        </header>
+
+        <section className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+          <Metric title="Profit Global" value={money(globalMetrics.netProfit)} tone={globalMetrics.netProfit >= 0 ? 'green' : 'red'} />
+          <Metric title="Win Rate Global" value={pct(globalMetrics.winRate)} />
+          <Metric title="Crypto PnL" value={money(cryptoMetrics.netProfit)} tone={cryptoMetrics.netProfit >= 0 ? 'green' : 'red'} />
+          <Metric title="Crypto WR" value={pct(cryptoMetrics.winRate)} />
+          <Metric title="Forex PnL" value={money(forexMetrics.netProfit)} tone={forexMetrics.netProfit >= 0 ? 'green' : 'red'} />
+          <Metric title="Forex WR" value={pct(forexMetrics.winRate)} />
+        </section>
+
+        <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <MarketPanel title="CRYPTO · BINANCE FUTURES" accent="indigo" subtitle="Máximo 10 coins simultáneas · símbolos únicos">
+            <SettingsGrid>
+              <NumberSetting label="Slots Crypto" value={settings.maxConcurrentCryptoTrades} min={1} max={10} step={1} suffix="/10" onSave={(v) => patchSettings({ maxConcurrentCryptoTrades: v })} />
+              <NumberSetting label="Margen / trade" value={settings.cryptoMarginPctPerTrade} min={0.01} max={100} step={0.1} suffix="%" onSave={(v) => patchSettings({ cryptoMarginPctPerTrade: v })} />
+              <NumberSetting label="Leverage pedido" value={settings.cryptoRequestedLeverage} min={1} max={125} step={1} suffix="x" onSave={(v) => patchSettings({ cryptoRequestedLeverage: v })} />
+              <NumberSetting label="Pérdida máx. al SL" value={settings.cryptoMaxLossPctPerTrade} min={0.01} max={100} step={0.1} suffix="%" onSave={(v) => patchSettings({ cryptoMaxLossPctPerTrade: v })} />
+              <NumberSetting label="Confianza mínima" value={settings.cryptoMinSignalConfidence} min={0} max={100} step={1} suffix="%" onSave={(v) => patchSettings({ cryptoMinSignalConfidence: v })} />
+              <NumberSetting label="Rolling WR mínimo" value={settings.cryptoMinRollingWinRate} min={0} max={100} step={1} suffix="%" onSave={(v) => patchSettings({ cryptoMinRollingWinRate: v })} />
+            </SettingsGrid>
+
+            <MarketStats
+              items={[
+                ['Slots', `${activeCrypto.length}/${settings.maxConcurrentCryptoTrades}`],
+                ['Coins únicas', String(new Set(activeCrypto.map((t: any) => t.symbol)).size)],
+                ['Trades cerrados', String(cryptoMetrics.trades || 0)],
+                ['Profit Factor', formatFactor(cryptoMetrics.profitFactor)],
+              ]}
+            />
+
+            <Block title="POSICIONES ABIERTAS">
+              <PositionTable trades={activeCrypto} market="CRYPTO" />
+            </Block>
+
+            <Block title="TOP 10 OPORTUNIDADES ÚNICAS">
+              <OpportunityTable rows={cryptoOpps} crypto />
+            </Block>
+
+            <Block title="HISTORIAL CRYPTO">
+              <HistoryTable trades={recentCrypto} />
+            </Block>
+          </MarketPanel>
+
+          <MarketPanel title="FOREX · METATRADER 5" accent="cyan" subtitle="Retests permitidos · tickets independientes por entrada">
+            <SettingsGrid>
+              <NumberSetting label="Máx. tickets Forex" value={settings.maxConcurrentForexTrades} min={1} max={200} step={1} onSave={(v) => patchSettings({ maxConcurrentForexTrades: v })} />
+              <NumberSetting label="% por operación" value={settings.forexPctPerTrade} min={0.01} max={100} step={0.1} suffix="%" onSave={(v) => patchSettings({ forexPctPerTrade: v })} />
+              <SelectSetting label="Cálculo de lote" value={settings.forexRiskMode} options={[['RISK_TO_SL', 'Riesgo hasta SL'], ['MARGIN_PERCENT', '% de margen']]} onSave={(v) => patchSettings({ forexRiskMode: v })} />
+              <NumberSetting label="Máx. entradas/par" value={settings.forexMaxEntriesPerSymbol} min={0} max={50} step={1} suffix={settings.forexMaxEntriesPerSymbol === 0 ? '∞' : ''} onSave={(v) => patchSettings({ forexMaxEntriesPerSymbol: v })} />
+              <NumberSetting label="Slippage máx." value={settings.forexMaxDeviationPoints} min={0} max={1000} step={1} suffix="pts" onSave={(v) => patchSettings({ forexMaxDeviationPoints: v })} />
+              <div className="bg-black/30 border border-slate-800 rounded-2xl p-3">
+                <p className="text-[8px] text-slate-500 uppercase font-black tracking-widest">Modo de cuenta</p>
+                <p className={`mt-2 text-sm font-black ${(mt5Status?.account?.hedging ?? settings.appMode === 'PAPER') ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {settings.appMode === 'PAPER' ? 'PAPER' : mt5Status?.account?.hedging ? 'HEDGING' : 'NETTING / CHECK'}
+                </p>
+              </div>
+            </SettingsGrid>
+
+            <MarketStats
+              items={[
+                ['Tickets', `${activeForex.length}/${settings.maxConcurrentForexTrades}`],
+                ['Pares activos', String(new Set(activeForex.map((t: any) => t.symbol)).size)],
+                ['Trades cerrados', String(forexMetrics.trades || 0)],
+                ['Profit Factor', formatFactor(forexMetrics.profitFactor)],
+              ]}
+            />
+
+            <Block title="POSICIONES / REENTRADAS ABIERTAS">
+              <PositionTable trades={activeForex} market="FOREX" />
+            </Block>
+
+            <Block title="COLA DE SETUPS FOREX">
+              <OpportunityTable rows={forexOpps} />
+            </Block>
+
+            <Block title="HISTORIAL FOREX">
+              <HistoryTable trades={recentForex} />
+            </Block>
+          </MarketPanel>
+        </section>
+
+        <section className="bg-[#0d1117] border border-slate-800 rounded-3xl p-4 md:p-6 shadow-2xl">
+          <div className="flex flex-wrap justify-between gap-4 items-center">
+            <div>
+              <h2 className="text-sm font-black uppercase tracking-widest text-white">Persistencia y seguridad operativa</h2>
+              <p className="text-[9px] text-slate-500 mt-2 max-w-4xl leading-relaxed">
+                La página ya no guarda la verdad operativa. Al abrirse consulta SQLite en el backend y reconstruye posiciones, historial y métricas. Binance usa como máximo 10 símbolos únicos; Forex permite múltiples tickets del mismo par únicamente cuando son señales/retests distintos y la cuenta MT5 admite hedging.
+              </p>
+            </div>
+            <div className="text-right text-[9px] text-slate-500 uppercase space-y-1">
+              <p>Closed trades: <span className="text-white font-black">{globalMetrics.trades || 0}</span></p>
+              <p>Open trades: <span className="text-white font-black">{globalMetrics.openTrades || 0}</span></p>
+              <p>Fees: <span className="text-white font-black">{money(globalMetrics.fees)}</span></p>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   );
 };
+
+const emptyMetrics = {
+  trades: 0, wins: 0, losses: 0, winRate: 0, netProfit: 0, profitFactor: 0,
+  openTrades: 0, fees: 0, unrealizedPnl: 0,
+};
+
+const StatusDot = ({ on }: { on: boolean }) => (
+  <div className={`w-3 h-3 rounded-full ${on ? 'bg-indigo-500 animate-pulse shadow-[0_0_15px_#6366f1]' : 'bg-slate-700'}`} />
+);
+
+const StatusLabel = ({ label, ok, configured }: { label: string; ok: boolean; configured?: boolean }) => (
+  <span className="flex items-center gap-1.5">
+    <i className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-emerald-500' : configured ? 'bg-amber-500' : 'bg-rose-500'}`} />
+    {label}
+  </span>
+);
+
+const Metric = ({ title, value, tone }: { title: string; value: string; tone?: 'green' | 'red' }) => (
+  <div className="bg-[#0d1117] border border-slate-800 rounded-2xl p-4 shadow-xl">
+    <p className="text-[8px] uppercase tracking-[0.2em] text-slate-500 font-black">{title}</p>
+    <p className={`text-xl md:text-2xl mt-2 font-black tracking-tighter ${tone === 'green' ? 'text-emerald-400' : tone === 'red' ? 'text-rose-400' : 'text-white'}`}>{value}</p>
+  </div>
+);
+
+const MarketPanel = ({ title, subtitle, accent, children }: any) => (
+  <section className={`bg-[#0d1117] border ${accent === 'cyan' ? 'border-cyan-950/70' : 'border-indigo-950/70'} rounded-[2rem] p-4 md:p-6 shadow-2xl space-y-4`}>
+    <div className="flex justify-between items-start gap-4">
+      <div>
+        <h2 className={`text-lg md:text-xl font-black italic uppercase ${accent === 'cyan' ? 'text-cyan-400' : 'text-indigo-400'}`}>{title}</h2>
+        <p className="text-[9px] text-slate-500 mt-1 uppercase tracking-widest">{subtitle}</p>
+      </div>
+    </div>
+    {children}
+  </section>
+);
+
+const SettingsGrid = ({ children }: any) => <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">{children}</div>;
+
+const NumberSetting = ({ label, value, min, max, step, suffix = '', onSave }: any) => {
+  const [draft, setDraft] = useState(String(value ?? ''));
+  useEffect(() => setDraft(String(value ?? '')), [value]);
+  const save = () => {
+    const number = Number(draft);
+    if (Number.isFinite(number)) onSave(number);
+  };
+  return (
+    <label className="bg-black/30 border border-slate-800 rounded-2xl p-3 block">
+      <span className="text-[8px] text-slate-500 uppercase font-black tracking-widest">{label}</span>
+      <div className="flex items-center gap-2 mt-2">
+        <input
+          type="number"
+          value={draft}
+          min={min}
+          max={max}
+          step={step}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={save}
+          onKeyDown={(e) => e.key === 'Enter' && save()}
+          className="w-full bg-[#05080d] border border-slate-700 rounded-xl px-3 py-2 text-sm font-black text-white outline-none focus:border-indigo-500"
+        />
+        {suffix && <span className="text-[9px] font-black text-slate-500">{suffix}</span>}
+      </div>
+    </label>
+  );
+};
+
+const SelectSetting = ({ label, value, options, onSave }: any) => (
+  <label className="bg-black/30 border border-slate-800 rounded-2xl p-3 block">
+    <span className="text-[8px] text-slate-500 uppercase font-black tracking-widest">{label}</span>
+    <select value={value} onChange={(e) => onSave(e.target.value)} className="w-full mt-2 bg-[#05080d] border border-slate-700 rounded-xl px-3 py-2 text-[10px] font-black text-white">
+      {options.map(([v, text]: string[]) => <option key={v} value={v}>{text}</option>)}
+    </select>
+  </label>
+);
+
+const MarketStats = ({ items }: { items: Array<[string, string]> }) => (
+  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+    {items.map(([label, value]) => (
+      <div key={label} className="bg-black/30 border border-slate-800 rounded-2xl p-3">
+        <p className="text-[7px] uppercase font-black tracking-widest text-slate-600">{label}</p>
+        <p className="text-base font-black text-white mt-1">{value}</p>
+      </div>
+    ))}
+  </div>
+);
+
+const Block = ({ title, children }: any) => (
+  <div className="bg-black/20 border border-slate-800 rounded-2xl overflow-hidden">
+    <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+      <h3 className="text-[9px] font-black tracking-[0.18em] uppercase text-slate-400">{title}</h3>
+    </div>
+    {children}
+  </div>
+);
+
+const PositionTable = ({ trades, market }: { trades: any[]; market: 'CRYPTO' | 'FOREX' }) => {
+  if (!trades.length) return <Empty text="Sin posiciones abiertas" />;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[700px] text-left">
+        <thead className="text-[7px] uppercase tracking-widest text-slate-600">
+          <tr>{['Símbolo', 'Side', market === 'CRYPTO' ? 'Lev/Margen' : 'Ticket/Lote', 'Entry', 'SL', 'TP', 'PnL', 'Estado'].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {trades.map((t) => (
+            <tr key={t.id} className="border-t border-slate-900 text-[9px]">
+              <td className="px-3 py-3 font-black text-white">{t.symbol}</td>
+              <td className={`px-3 py-3 font-black ${t.side === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}`}>{t.side}</td>
+              <td className="px-3 py-3 text-slate-300">{market === 'CRYPTO' ? `${t.leverage ?? '-'}x · ${money(t.marginUsed)}` : `${t.brokerOrderId ?? '-'} · ${t.lotSize ?? '-'}`}</td>
+              <td className="px-3 py-3">{price(t.entryPrice)}</td>
+              <td className="px-3 py-3 text-rose-300">{price(t.stopLoss)}</td>
+              <td className="px-3 py-3 text-emerald-300">{price(t.takeProfit)}</td>
+              <td className={`px-3 py-3 font-black ${(t.unrealizedPnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{money(t.unrealizedPnl)}</td>
+              <td className="px-3 py-3 text-slate-500">{t.state}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+const OpportunityTable = ({ rows, crypto = false }: { rows: any[]; crypto?: boolean }) => {
+  if (!rows.length) return <Empty text="Esperando oportunidades del scanner" />;
+  return (
+    <div className="overflow-x-auto max-h-[310px] overflow-y-auto">
+      <table className="w-full min-w-[650px] text-left">
+        <thead className="text-[7px] uppercase tracking-widest text-slate-600 sticky top-0 bg-[#080c12]">
+          <tr>{['#', 'Símbolo', 'Side', 'TF', 'Score', 'Conf.', 'WR', crypto ? 'Regla' : 'Setup'].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={r.id || `${r.symbol}-${i}`} className="border-t border-slate-900 text-[9px]">
+              <td className="px-3 py-2 text-slate-600">{i + 1}</td>
+              <td className="px-3 py-2 text-white font-black">{r.symbol}</td>
+              <td className={`px-3 py-2 font-black ${r.side === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}`}>{r.side}</td>
+              <td className="px-3 py-2">{r.timeframe}</td>
+              <td className="px-3 py-2 text-indigo-300 font-black">{Number(r.score || 0).toFixed(1)}</td>
+              <td className="px-3 py-2">{pct(r.confidence)}</td>
+              <td className="px-3 py-2">{pct(r.rollingWinRate)}</td>
+              <td className="px-3 py-2 text-slate-600">{crypto ? '1 coin / símbolo' : r.strategy}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+const HistoryTable = ({ trades }: { trades: any[] }) => {
+  if (!trades.length) return <Empty text="Aún no hay historial" />;
+  return (
+    <div className="overflow-x-auto max-h-[300px] overflow-y-auto">
+      <table className="w-full min-w-[680px] text-left">
+        <thead className="text-[7px] uppercase tracking-widest text-slate-600 sticky top-0 bg-[#080c12]">
+          <tr>{['Símbolo', 'Side', 'Estado', 'Entrada', 'Salida', 'PnL', 'Motivo', 'Hora'].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {trades.map((t) => (
+            <tr key={t.id} className="border-t border-slate-900 text-[9px]">
+              <td className="px-3 py-2 font-black text-white">{t.symbol}</td>
+              <td className={`px-3 py-2 ${t.side === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}`}>{t.side}</td>
+              <td className="px-3 py-2 text-slate-500">{t.state}</td>
+              <td className="px-3 py-2">{price(t.entryPrice)}</td>
+              <td className="px-3 py-2">{price(t.exitPrice)}</td>
+              <td className={`px-3 py-2 font-black ${(t.realizedPnl || t.unrealizedPnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{money(t.state === 'CLOSED' ? t.realizedPnl : t.unrealizedPnl)}</td>
+              <td className="px-3 py-2 text-slate-600">{t.closeReason || '—'}</td>
+              <td className="px-3 py-2 text-slate-600">{new Date(t.closeTime || t.openTime || t.createdAt).toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+const Empty = ({ text }: { text: string }) => <div className="py-8 text-center text-[9px] uppercase tracking-widest text-slate-700">{text}</div>;
+
+function money(value: any): string {
+  const n = Number(value || 0);
+  return `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(2)}`;
+}
+function pct(value: any): string { return `${Number(value || 0).toFixed(1)}%`; }
+function price(value: any): string { return value == null ? '—' : String(Number(Number(value).toFixed(8))); }
+function formatFactor(value: any): string { return value == null ? '∞' : Number(value || 0).toFixed(2); }
 
 export default App;
