@@ -29,11 +29,7 @@ export class BinanceMarketDataClient {
   async getTradableUsdtPerpetualSymbols(): Promise<string[]> {
     const data = await this.getJson<{ symbols: any[] }>('/fapi/v1/exchangeInfo');
     return (data.symbols ?? [])
-      .filter((symbol) =>
-        symbol.contractType === 'PERPETUAL' &&
-        symbol.status === 'TRADING' &&
-        symbol.quoteAsset === 'USDT',
-      )
+      .filter((symbol) => symbol.contractType === 'PERPETUAL' && symbol.status === 'TRADING' && symbol.quoteAsset === 'USDT')
       .map((symbol) => String(symbol.symbol))
       .sort();
   }
@@ -55,6 +51,15 @@ export class BinanceMarketDataClient {
     return mapKlines(rows);
   }
 
+  async getMarkPrice(symbol: string): Promise<number> {
+    const row = await this.getJson<{ markPrice?: string | number }>(
+      `/fapi/v1/premiumIndex?symbol=${encodeURIComponent(symbol)}`,
+    );
+    const mark = Number(row.markPrice ?? 0);
+    if (!Number.isFinite(mark) || mark <= 0) throw new Error(`BINANCE_MARK_PRICE_INVALID:${symbol}`);
+    return mark;
+  }
+
   async getMarkPriceKlines(symbol: string, interval: BinanceInterval, limit: number): Promise<Candle[]> {
     const rows = await this.getJson<any[]>(
       `/fapi/v1/markPriceKlines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${Math.max(1, Math.min(1500, limit))}`,
@@ -62,21 +67,11 @@ export class BinanceMarketDataClient {
     return mapKlines(rows);
   }
 
-  async getKlinesRange(
-    symbol: string,
-    interval: BinanceInterval,
-    startTime: number,
-    endTime: number,
-  ): Promise<Candle[]> {
+  async getKlinesRange(symbol: string, interval: BinanceInterval, startTime: number, endTime: number): Promise<Candle[]> {
     return this.getRange('/fapi/v1/klines', symbol, interval, startTime, endTime);
   }
 
-  async getMarkPriceKlinesRange(
-    symbol: string,
-    interval: BinanceInterval,
-    startTime: number,
-    endTime: number,
-  ): Promise<Candle[]> {
+  async getMarkPriceKlinesRange(symbol: string, interval: BinanceInterval, startTime: number, endTime: number): Promise<Candle[]> {
     return this.getRange('/fapi/v1/markPriceKlines', symbol, interval, startTime, endTime);
   }
 
@@ -100,8 +95,7 @@ export class BinanceMarketDataClient {
       const batch = mapKlines(rows).filter((candle) => candle.time >= startTime && candle.time <= endTime);
       if (!batch.length) break;
       output.push(...batch);
-      const lastTime = batch.at(-1)!.time;
-      const next = lastTime + intervalMs;
+      const next = batch.at(-1)!.time + intervalMs;
       if (next <= cursor) break;
       cursor = next;
       calls++;
@@ -113,21 +107,18 @@ export class BinanceMarketDataClient {
     return dedupeCandles(output);
   }
 
+  /** Exact live data window used by the original v33.5 browser engine. */
   async getDualKlines(symbol: string): Promise<{ ltf: Candle[]; htf: Candle[] }> {
     const [ltf, htf] = await Promise.all([
-      this.getKlines(symbol, '1m', 220),
-      this.getKlines(symbol, '15m', 260),
+      this.getKlines(symbol, '1m', 100),
+      this.getKlines(symbol, '15m', 210),
     ]);
     return { ltf, htf };
   }
 
-  async getDualHistoricalRange(
-    symbol: string,
-    startTime: number,
-    endTime: number,
-  ): Promise<{ ltf: Candle[]; htf: Candle[] }> {
-    // Warm-up provides enough prior bars for EMA200 on the 15m structure filter.
-    const warmupStart = startTime - 15 * 60_000 * 260;
+  async getDualHistoricalRange(symbol: string, startTime: number, endTime: number): Promise<{ ltf: Candle[]; htf: Candle[] }> {
+    // Exact historical warm-up for a rolling 100xM1 / 210xM15 v33.5 decision window.
+    const warmupStart = startTime - 15 * 60_000 * 210;
     const [ltf, htf] = await Promise.all([
       this.getKlinesRange(symbol, '1m', Math.max(0, warmupStart), endTime),
       this.getKlinesRange(symbol, '15m', Math.max(0, warmupStart), endTime),
