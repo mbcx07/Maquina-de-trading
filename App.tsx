@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { v34Api } from './services/v34Api';
 
 type View = 'dashboard' | 'settings' | 'backtest';
@@ -71,6 +71,8 @@ const App: React.FC = () => {
     return v34Api.emergencyStop();
   });
 
+  const stopMode = settings.emergencyStopMode || 'PAUSE_ONLY';
+
   return (
     <div className="min-h-screen bg-[#010409] text-slate-200 p-3 md:p-5 font-mono">
       <div className="max-w-[1850px] mx-auto space-y-4">
@@ -116,12 +118,18 @@ const App: React.FC = () => {
               <button
                 disabled={busy}
                 onClick={() => void engineAction('stop')}
+                title={stopMode === 'CLOSE_TRACKED' ? 'Pausa y solicita cierre de posiciones V34' : 'Solo pausa nuevas entradas'}
                 className="px-5 py-3 rounded-xl text-[9px] font-black uppercase bg-rose-700 text-white border border-rose-500/50"
               >
-                Emergency Stop
+                Emergency Stop · {stopMode === 'CLOSE_TRACKED' ? 'Close' : 'Pause'}
               </button>
             </div>
           </div>
+          {state.emergencyStop?.active && (
+            <div className="mt-4 bg-rose-500/10 border border-rose-500/30 text-rose-300 rounded-xl px-4 py-3 text-[9px] uppercase font-black">
+              Emergency Stop activo · {state.emergencyStop.mode || stopMode}
+            </div>
+          )}
           {error && <Banner tone="error">{error}</Banner>}
           {notice && <Banner tone="success">{notice}</Banner>}
         </header>
@@ -129,7 +137,6 @@ const App: React.FC = () => {
         {view === 'dashboard' && <Dashboard state={state} settings={settings} patchSettings={patchSettings} />}
         {view === 'settings' && (
           <SettingsView
-            state={state}
             settings={settings}
             binance={binanceStatus}
             telegram={telegramStatus}
@@ -173,9 +180,9 @@ function Dashboard({ state, settings, patchSettings }: any) {
         <ValidationCard title="CRYPTO VALIDATION" trades={cryptoMetrics.trades || 0} target={100} net={cryptoMetrics.netProfit || 0} pf={cryptoMetrics.profitFactor} />
         <ValidationCard title="FOREX VALIDATION" trades={forexMetrics.trades || 0} target={100} net={forexMetrics.netProfit || 0} pf={forexMetrics.profitFactor} />
         <div className="bg-[#0d1117] border border-slate-800 rounded-2xl p-4">
-          <p className="text-[8px] uppercase tracking-widest text-slate-500 font-black">Risk Guard</p>
+          <p className="text-[8px] uppercase tracking-widest text-slate-500 font-black">Safety</p>
           <p className={`text-lg mt-2 font-black ${state.riskGuard?.status === 'TRIPPED' ? 'text-rose-400' : 'text-emerald-400'}`}>{state.riskGuard?.status || 'INITIALIZING'}</p>
-          <p className="text-[8px] text-slate-600 mt-2">Daily limit {settings.dailyLossLimitPct}% · DD max {settings.maxDrawdownPct}%</p>
+          <p className="text-[8px] text-slate-600 mt-2">Daily {settings.dailyLossLimitPct}% · DD {settings.maxDrawdownPct}% · Stop {settings.emergencyStopMode || 'PAUSE_ONLY'}</p>
         </div>
       </section>
 
@@ -201,14 +208,14 @@ function Dashboard({ state, settings, patchSettings }: any) {
           <Block title="HISTORIAL CRYPTO"><HistoryTable trades={recentCrypto} /></Block>
         </MarketPanel>
 
-        <MarketPanel title="FOREX · METATRADER 5" accent="cyan" subtitle="Retests permitidos · cada entrada conserva su ticket">
+        <MarketPanel title="FOREX · METATRADER 5" accent="cyan" subtitle="Retests permitidos · filtro de spread antes de ejecutar">
           <ScannerLine scanner={state.scanners?.forex} />
           <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
             <NumberSetting label="Máx. tickets" value={settings.maxConcurrentForexTrades} min={1} max={200} step={1} onSave={(v: number) => patchSettings({ maxConcurrentForexTrades: v })} />
             <NumberSetting label="% por trade" value={settings.forexPctPerTrade} min={0.01} max={100} step={0.1} suffix="%" onSave={(v: number) => patchSettings({ forexPctPerTrade: v })} />
             <SelectSetting label="Sizing" value={settings.forexRiskMode} options={[['RISK_TO_SL', 'Riesgo hasta SL'], ['MARGIN_PERCENT', '% de margen']]} onSave={(v: string) => patchSettings({ forexRiskMode: v })} />
             <NumberSetting label="Entradas / par" value={settings.forexMaxEntriesPerSymbol} min={0} max={50} step={1} suffix={settings.forexMaxEntriesPerSymbol === 0 ? '∞' : ''} onSave={(v: number) => patchSettings({ forexMaxEntriesPerSymbol: v })} />
-            <NumberSetting label="Confianza mín." value={settings.forexMinSignalConfidence} min={0} max={100} step={1} suffix="%" onSave={(v: number) => patchSettings({ forexMinSignalConfidence: v })} />
+            <NumberSetting label="Spread máx." value={settings.forexMaxSpreadPoints ?? 30} min={0} max={100000} step={1} suffix="pts" onSave={(v: number) => patchSettings({ forexMaxSpreadPoints: v })} />
             <InfoBox label="Modo MT5" value={settings.appMode === 'PAPER' ? 'PAPER' : mt5Status?.account?.hedging ? 'HEDGING' : 'NETTING / CHECK'} />
           </div>
           <Stats items={[
@@ -226,7 +233,7 @@ function Dashboard({ state, settings, patchSettings }: any) {
   );
 }
 
-function SettingsView({ state, settings, binance, telegram, mt5, mt5Status, busy, run, patchSettings }: any) {
+function SettingsView({ settings, binance, telegram, mt5, mt5Status, busy, run, patchSettings }: any) {
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
   const [botToken, setBotToken] = useState('');
@@ -264,9 +271,9 @@ function SettingsView({ state, settings, binance, telegram, mt5, mt5Status, busy
     <div className="space-y-4">
       <section className="bg-gradient-to-br from-indigo-950/35 to-[#0d1117] border border-indigo-900/40 rounded-3xl p-5 md:p-7 shadow-2xl">
         <p className="text-[8px] uppercase tracking-[0.25em] font-black text-indigo-400">Instalación individual</p>
-        <h2 className="text-2xl md:text-3xl font-black text-white tracking-tight mt-2">Conexiones del motor</h2>
+        <h2 className="text-2xl md:text-3xl font-black text-white tracking-tight mt-2">Conexiones y seguridad</h2>
         <p className="text-[10px] text-slate-400 leading-6 mt-3 max-w-5xl">
-          Binance, Telegram y el token del bridge MT5 se almacenan cifrados en el backend. La contraseña de tu cuenta MT5 puede quedarse únicamente dentro del terminal MetaTrader 5 abierto en Windows/VPS.
+          Binance, Telegram y el token del bridge MT5 se almacenan cifrados en el backend. La contraseña de tu cuenta MT5 puede quedarse únicamente dentro del terminal MetaTrader 5.
         </p>
       </section>
 
@@ -274,14 +281,14 @@ function SettingsView({ state, settings, binance, telegram, mt5, mt5Status, busy
         <IntegrationCard title="BINANCE FUTURES" icon="₿" status={binance} description="Cuenta USDⓈ-M Futures para Crypto.">
           <SecretField label="API Key" value={apiKey} onChange={setApiKey} placeholder={binance.configured ? 'Nueva API Key para reemplazar' : 'API Key'} type="text" />
           <SecretField label="API Secret" value={apiSecret} onChange={setApiSecret} placeholder="API Secret" type={showBinanceSecret ? 'text' : 'password'} toggle={() => setShowBinanceSecret((v) => !v)} />
-          <SecurityHint>Usa Futures, sin permiso de retiros. Para REAL añadiremos whitelist de IP.</SecurityHint>
+          <SecurityHint>Futures habilitado, retiros deshabilitados. Para REAL usa whitelist de IP.</SecurityHint>
           <IntegrationActions configured={binance.configured} busy={busy} save={saveBinance} test={() => run(() => v34Api.testIntegration('binance'), 'Binance validado.')} remove={() => run(() => v34Api.removeIntegration('binance'), 'Binance desconectado.')} />
         </IntegrationCard>
 
-        <IntegrationCard title="MT5 BRIDGE" icon="M5" status={mt5} description="Conecta el terminal MT5 que está abierto en tu PC/VPS Windows.">
+        <IntegrationCard title="MT5 BRIDGE" icon="M5" status={mt5} description="Conecta el terminal MT5 abierto en tu PC/VPS Windows.">
           <SecretField label="Bridge URL" value={bridgeUrl} onChange={setBridgeUrl} placeholder="http://127.0.0.1:8790" type="text" />
           <SecretField label="Bridge Token" value={bridgeToken} onChange={setBridgeToken} placeholder="Token privado del bridge" type={showBridgeToken ? 'text' : 'password'} toggle={() => setShowBridgeToken((v) => !v)} />
-          <SecurityHint>No pegues aquí la contraseña de tu broker. MT5 puede permanecer iniciado y el bridge usa esa sesión.</SecurityHint>
+          <SecurityHint>No pegues la contraseña del broker. MT5 puede permanecer iniciado y el bridge usa esa sesión.</SecurityHint>
           {mt5Status?.account && (
             <div className="grid grid-cols-2 gap-2">
               <InfoBox label="Cuenta" value={String(mt5Status.account.login || '—')} />
@@ -302,20 +309,33 @@ function SettingsView({ state, settings, binance, telegram, mt5, mt5Status, busy
       </section>
 
       <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <Panel title="CONFIGURACIÓN DE RIESGO GLOBAL">
+        <Panel title="RIESGO Y EMERGENCIA">
           <div className="grid grid-cols-2 gap-2">
             <NumberSetting label="Pérdida diaria máx." value={settings.dailyLossLimitPct} min={0.1} max={100} step={0.1} suffix="%" onSave={(v: number) => patchSettings({ dailyLossLimitPct: v })} />
             <NumberSetting label="Drawdown máximo" value={settings.maxDrawdownPct} min={0.1} max={100} step={0.1} suffix="%" onSave={(v: number) => patchSettings({ maxDrawdownPct: v })} />
+            <NumberSetting label="Spread máx. Forex" value={settings.forexMaxSpreadPoints ?? 30} min={0} max={100000} step={1} suffix="pts" onSave={(v: number) => patchSettings({ forexMaxSpreadPoints: v })} />
+            <SelectSetting
+              label="Emergency Stop"
+              value={settings.emergencyStopMode || 'PAUSE_ONLY'}
+              options={[
+                ['PAUSE_ONLY', 'Solo pausar entradas'],
+                ['CLOSE_TRACKED', 'Cerrar operaciones V34 y pausar'],
+              ]}
+              onSave={(v: string) => patchSettings({ emergencyStopMode: v })}
+            />
           </div>
           <div className="grid grid-cols-2 gap-2 mt-3">
             <ToggleSetting label="Crypto activo" checked={Boolean(settings.cryptoEnabled)} onChange={(checked: boolean) => patchSettings({ cryptoEnabled: checked })} />
             <ToggleSetting label="Forex activo" checked={Boolean(settings.forexEnabled)} onChange={(checked: boolean) => patchSettings({ forexEnabled: checked })} />
             <ToggleSetting label="Risk Kill-Switch" checked={Boolean(settings.riskKillSwitchEnabled)} onChange={(checked: boolean) => patchSettings({ riskKillSwitchEnabled: checked })} />
           </div>
+          <div className="mt-3 rounded-2xl bg-rose-500/5 border border-rose-500/20 p-4 text-[8px] text-rose-200/70 leading-5">
+            CLOSE_TRACKED solo solicita el cierre de posiciones registradas por V34. No debe cerrar operaciones manuales externas. El reconciliador confirma después el cierre y PnL real.
+          </div>
         </Panel>
 
         <Panel title="UNIVERSO FOREX MT5">
-          <p className="text-[8px] text-slate-500 leading-5 mb-3">Usa los símbolos exactos publicados por tu broker. Ejemplo: algunos brokers usan EURUSD, otros EURUSDm.</p>
+          <p className="text-[8px] text-slate-500 leading-5 mb-3">Usa los símbolos exactos publicados por tu broker. Ejemplo: EURUSD o EURUSDm.</p>
           <textarea value={forexSymbols} onChange={(e) => setForexSymbols(e.target.value)} className="w-full min-h-28 bg-[#05080d] border border-slate-700 rounded-2xl p-4 text-[10px] text-white outline-none focus:border-cyan-600" />
           <div className="mt-3"><PrimaryButton disabled={busy} onClick={() => void saveForexSymbols()}>Guardar pares Forex</PrimaryButton></div>
         </Panel>
@@ -323,10 +343,10 @@ function SettingsView({ state, settings, binance, telegram, mt5, mt5Status, busy
 
       <Panel title="MT5 · ARRANQUE LOCAL">
         <div className="grid md:grid-cols-4 gap-3">
-          <ArchitectureStep n="1" title="Abrir MT5" text="Inicia sesión en una cuenta Demo y activa trading algorítmico." />
+          <ArchitectureStep n="1" title="Abrir MT5" text="Inicia sesión en Demo y activa trading algorítmico." />
           <ArchitectureStep n="2" title="Bridge" text="Ejecuta uvicorn app:app en el mismo Windows/VPS." />
-          <ArchitectureStep n="3" title="Conectar" text="Guarda URL 127.0.0.1:8790 y el token privado aquí." />
-          <ArchitectureStep n="4" title="Validar" text="La app comprueba balance, hedging y permisos de Expert Trading." />
+          <ArchitectureStep n="3" title="Conectar" text="Guarda URL 127.0.0.1:8790 y token privado." />
+          <ArchitectureStep n="4" title="Validar" text="Comprueba balance, hedging, permisos y spread." />
         </div>
       </Panel>
     </div>
@@ -444,7 +464,7 @@ function BacktestView({ settings, mt5Connected }: any) {
               <SmallNumber label="Máx. duración min" value={maxHold} set={setMaxHold} step={15} />
             </div>
             <SelectField label="Modelo de tamaño" value={sizingMode} onChange={(v: string) => setSizingMode(v as any)} options={[['MARGIN_PERCENT', '% margen × leverage'], ['RISK_TO_SL', '% de equity hasta SL']]} />
-            <SecurityHint>El costo es una hipótesis editable. Para decidir rentabilidad final usaremos también los costos reales recogidos por las operaciones Demo/Testnet.</SecurityHint>
+            <SecurityHint>El costo es editable. Para decidir rentabilidad final se contrastará con fees, funding, spread, comisión y swap reales de Demo/Testnet.</SecurityHint>
             {error && <Banner tone="error">{error}</Banner>}
             <PrimaryButton disabled={busy} onClick={() => void start()}>{busy ? 'Iniciando…' : 'Ejecutar backtest'}</PrimaryButton>
           </div>
@@ -496,27 +516,21 @@ function BacktestResult({ result }: any) {
         <Metric title="Expectancy" value={money(m.expectancy)} tone={m.expectancy >= 0 ? 'green' : 'red'} />
         <Metric title="Costs" value={money(m.costs)} tone="red" />
       </section>
-
-      <Panel title="CURVA DE EQUITY">
-        <EquityChart points={result.equityCurve || []} />
-      </Panel>
-
+      <Panel title="CURVA DE EQUITY"><EquityChart points={result.equityCurve || []} /></Panel>
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <SampleCard title="70% IN-SAMPLE" metrics={ins} />
         <SampleCard title="30% OUT-OF-SAMPLE" metrics={oos} emphasize />
       </section>
-
       <Panel title="RESULTADO POR SÍMBOLO">
         <div className="overflow-auto max-h-[360px]"><table className="w-full min-w-[650px] text-left"><thead className="text-[7px] uppercase text-slate-600"><tr>{['Símbolo','Trades','WR','Profit','Return','PF','DD'].map((h) => <th key={h} className="px-3 py-2">{h}</th>)}</tr></thead><tbody>{(result.bySymbol || []).map((row: any) => <tr key={row.symbol} className="border-t border-slate-900 text-[9px]"><td className="px-3 py-3 font-black text-white">{row.symbol}</td><td className="px-3 py-3">{row.metrics.trades}</td><td className="px-3 py-3">{pct(row.metrics.winRate)}</td><td className={`px-3 py-3 font-black ${row.metrics.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{money(row.metrics.netProfit)}</td><td className="px-3 py-3">{pct(row.metrics.returnPct)}</td><td className="px-3 py-3">{factor(row.metrics.profitFactor)}</td><td className="px-3 py-3">{pct(row.metrics.maxDrawdownPct)}</td></tr>)}</tbody></table></div>
       </Panel>
-
       <Panel title="INTERPRETACIÓN">
         <div className="grid md:grid-cols-3 gap-3">
           <Verdict label="Rentabilidad OOS" ok={oos.netProfit > 0} text={oos.netProfit > 0 ? 'Positiva fuera de muestra' : 'Negativa fuera de muestra'} />
           <Verdict label="Expectancy OOS" ok={oos.expectancy > 0} text={`${money(oos.expectancy)} por trade`} />
           <Verdict label="Profit Factor OOS" ok={(oos.profitFactor ?? 0) > 1} text={factor(oos.profitFactor)} />
         </div>
-        <p className="text-[8px] text-slate-500 leading-5 mt-4">Un resultado positivo aquí no garantiza rentabilidad futura. Lo usaremos junto con Demo/Testnet, costos reales y varias ventanas de mercado antes de habilitar REAL.</p>
+        <p className="text-[8px] text-slate-500 leading-5 mt-4">Un resultado positivo no garantiza rentabilidad futura. Se debe repetir en varias ventanas y confirmarse en Demo/Testnet.</p>
       </Panel>
     </>
   );
@@ -528,41 +542,19 @@ function EquityChart({ points }: any) {
   const min = Math.min(...values);
   const max = Math.max(...values);
   const range = Math.max(1e-9, max - min);
-  const width = 800;
-  const height = 220;
-  const pad = 18;
+  const width = 800, height = 220, pad = 18;
   const line = points.map((p: any, i: number) => {
     const x = pad + (i / Math.max(1, points.length - 1)) * (width - pad * 2);
     const y = height - pad - ((Number(p.equity) - min) / range) * (height - pad * 2);
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
-  return (
-    <div>
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-[220px] bg-black/20 rounded-2xl border border-slate-800">
-        <line x1={pad} y1={height - pad} x2={width - pad} y2={height - pad} stroke="currentColor" className="text-slate-800" />
-        <polyline points={line} fill="none" stroke="currentColor" strokeWidth="3" className="text-indigo-400" />
-      </svg>
-      <div className="flex justify-between text-[8px] text-slate-600 mt-2"><span>Min {money(min)}</span><span>Max {money(max)}</span></div>
-    </div>
-  );
+  return <div><svg viewBox={`0 0 ${width} ${height}`} className="w-full h-[220px] bg-black/20 rounded-2xl border border-slate-800"><line x1={pad} y1={height-pad} x2={width-pad} y2={height-pad} stroke="currentColor" className="text-slate-800" /><polyline points={line} fill="none" stroke="currentColor" strokeWidth="3" className="text-indigo-400" /></svg><div className="flex justify-between text-[8px] text-slate-600 mt-2"><span>Min {money(min)}</span><span>Max {money(max)}</span></div></div>;
 }
 
-function SampleCard({ title, metrics, emphasize = false }: any) {
-  return <section className={`rounded-3xl p-5 border ${emphasize ? 'bg-indigo-500/5 border-indigo-800/60' : 'bg-[#0d1117] border-slate-800'}`}><p className="text-[9px] font-black uppercase tracking-widest text-white">{title}</p><div className="grid grid-cols-3 gap-2 mt-4"><MiniStat label="Profit" value={money(metrics.netProfit)} good={metrics.netProfit > 0} /><MiniStat label="WR" value={pct(metrics.winRate)} /><MiniStat label="PF" value={factor(metrics.profitFactor)} good={(metrics.profitFactor ?? 0) > 1} /><MiniStat label="Trades" value={String(metrics.trades || 0)} /><MiniStat label="DD" value={pct(metrics.maxDrawdownPct)} /><MiniStat label="Exp." value={money(metrics.expectancy)} good={metrics.expectancy > 0} /></div></section>;
-}
-
-function ValidationCard({ title, trades, target, net, pf }: any) {
-  const progress = Math.min(100, trades / target * 100);
-  return <div className="bg-[#0d1117] border border-slate-800 rounded-2xl p-4"><div className="flex justify-between"><p className="text-[8px] uppercase tracking-widest text-slate-500 font-black">{title}</p><span className="text-[8px] text-slate-600">{trades}/{target}</span></div><div className="h-1.5 bg-slate-900 rounded-full overflow-hidden mt-3"><div className="h-full bg-indigo-500" style={{ width: `${progress}%` }} /></div><div className="flex justify-between mt-3 text-[9px]"><span className={net >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{money(net)}</span><span className="text-slate-500">PF {factor(pf)}</span></div></div>;
-}
-
-function IntegrationActions({ configured, busy, save, test, remove }: any) {
-  return <div className="flex flex-wrap gap-2 pt-2"><PrimaryButton disabled={busy} onClick={() => void save()}>Guardar y conectar</PrimaryButton>{configured && <SecondaryButton disabled={busy} onClick={() => void test()}>Probar conexión</SecondaryButton>}{configured && <DangerButton disabled={busy} onClick={() => void remove()}>Desconectar</DangerButton>}</div>;
-}
-
-function integration(state: any, provider: IntegrationProvider) {
-  return (state.integrations || []).find((item: any) => item.provider === provider) || { provider, configured: false };
-}
+function SampleCard({ title, metrics, emphasize = false }: any) { return <section className={`rounded-3xl p-5 border ${emphasize ? 'bg-indigo-500/5 border-indigo-800/60' : 'bg-[#0d1117] border-slate-800'}`}><p className="text-[9px] font-black uppercase tracking-widest text-white">{title}</p><div className="grid grid-cols-3 gap-2 mt-4"><MiniStat label="Profit" value={money(metrics.netProfit)} good={metrics.netProfit > 0} /><MiniStat label="WR" value={pct(metrics.winRate)} /><MiniStat label="PF" value={factor(metrics.profitFactor)} good={(metrics.profitFactor ?? 0) > 1} /><MiniStat label="Trades" value={String(metrics.trades || 0)} /><MiniStat label="DD" value={pct(metrics.maxDrawdownPct)} /><MiniStat label="Exp." value={money(metrics.expectancy)} good={metrics.expectancy > 0} /></div></section>; }
+function ValidationCard({ title, trades, target, net, pf }: any) { const progress = Math.min(100, trades / target * 100); return <div className="bg-[#0d1117] border border-slate-800 rounded-2xl p-4"><div className="flex justify-between"><p className="text-[8px] uppercase tracking-widest text-slate-500 font-black">{title}</p><span className="text-[8px] text-slate-600">{trades}/{target}</span></div><div className="h-1.5 bg-slate-900 rounded-full overflow-hidden mt-3"><div className="h-full bg-indigo-500" style={{ width: `${progress}%` }} /></div><div className="flex justify-between mt-3 text-[9px]"><span className={net >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{money(net)}</span><span className="text-slate-500">PF {factor(pf)}</span></div></div>; }
+function IntegrationActions({ configured, busy, save, test, remove }: any) { return <div className="flex flex-wrap gap-2 pt-2"><PrimaryButton disabled={busy} onClick={() => void save()}>Guardar y conectar</PrimaryButton>{configured && <SecondaryButton disabled={busy} onClick={() => void test()}>Probar conexión</SecondaryButton>}{configured && <DangerButton disabled={busy} onClick={() => void remove()}>Desconectar</DangerButton>}</div>; }
+function integration(state: any, provider: IntegrationProvider) { return (state.integrations || []).find((item: any) => item.provider === provider) || { provider, configured: false }; }
 
 const emptyMetrics = { trades: 0, winRate: 0, netProfit: 0, profitFactor: 0 };
 const emptyHistorical = { trades: 0, winRate: 0, netProfit: 0, returnPct: 0, profitFactor: 0, expectancy: 0, maxDrawdownPct: 0, costs: 0 };
@@ -604,6 +596,6 @@ function pct(value: any) { return `${Number(value || 0).toFixed(1)}%`; }
 function factor(value: any) { return value == null ? '∞' : Number(value || 0).toFixed(2); }
 function price(value: any) { return value == null ? '—' : String(Number(Number(value).toFixed(8))); }
 function todayIso() { return new Date().toISOString().slice(0, 10); }
-function daysAgoIso(days: number) { const d = new Date(Date.now() - days * 86400000); return d.toISOString().slice(0, 10); }
+function daysAgoIso(days: number) { return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10); }
 
 export default App;
