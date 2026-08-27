@@ -9,6 +9,7 @@ import { CryptoMarketScanner } from './cryptoScanner.js';
 import { TradingDatabase } from './database.js';
 import { ForexExecutionService } from './forexExecution.js';
 import { ForexMarketScanner } from './forexScanner.js';
+import { HistoricalBacktestService } from './historicalBacktest.js';
 import { createIntegrationRouter } from './integrationRoutes.js';
 import { IntegrationVault, normalizeWorkspaceId } from './integrationVault.js';
 import { calculateMetrics, metricsByStrategy, metricsBySymbol } from './metrics.js';
@@ -22,7 +23,7 @@ import type { EngineSettings, Opportunity } from './types.js';
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '2mb' }));
 
 const database = new TradingDatabase(env.DB_PATH);
 const normalizedInitialSettings: EngineSettings = {
@@ -50,6 +51,7 @@ const reconciler = new PositionReconciler(database, repository, binance, mt5, te
 const riskGuard = new PortfolioRiskGuard(database, telegram, getSettings);
 const cryptoScanner = new CryptoMarketScanner(database, binanceMarket, orchestrator, getSettings);
 const forexScanner = new ForexMarketScanner(database, mt5, orchestrator, getSettings);
+const historicalBacktest = new HistoricalBacktestService(database, binanceMarket, mt5, getSettings);
 
 app.use('/api/integrations', createIntegrationRouter(vault, getSettings, () => workspaceId));
 
@@ -87,6 +89,20 @@ const settingsPatchSchema = z.object({
   forexMinRollingWinRate: z.number().min(0).max(100).optional(),
   forexMagicNumber: z.number().int().positive().optional(),
   forexMaxDeviationPoints: z.number().int().min(0).max(1000).optional(),
+});
+
+const backtestSchema = z.object({
+  broker: z.enum(['BINANCE', 'MT5']),
+  symbols: z.array(z.string().min(1)).min(1).max(25),
+  startTime: z.number().int().positive(),
+  endTime: z.number().int().positive(),
+  initialBalance: z.number().positive().default(1000),
+  allocationPct: z.number().positive().max(100).default(1),
+  leverage: z.number().min(1).max(125).default(20),
+  roundTripCostPct: z.number().min(0).max(10).default(0.12),
+  scanStepMinutes: z.number().int().min(1).max(60).default(3),
+  maxHoldMinutes: z.number().int().min(1).max(1440).default(90),
+  sizingMode: z.enum(['MARGIN_PERCENT', 'RISK_TO_SL']).default('RISK_TO_SL'),
 });
 
 app.get('/health', (_req, res) => {
@@ -160,6 +176,7 @@ app.get('/api/state', async (_req, res) => {
         cryptoUniqueSymbols: [...new Set(activeCrypto.map((trade) => trade.symbol))],
       },
       recentTrades: trades.slice(0, 250),
+      backtests: historicalBacktest.list(10),
       metrics: {
         global: calculateMetrics(trades),
         crypto: calculateMetrics(trades, 'BINANCE'),
@@ -203,16 +220,10 @@ app.post('/api/engine/start', async (_req, res) => {
       try {
         const health = await mt5.health();
         if (!health.account.tradeAllowed || !health.account.tradeExpert) {
-          return res.status(409).json({
-            error: 'MT5_AUTOTRADING_NOT_ALLOWED',
-            account: health.account,
-          });
+          return res.status(409).json({ error: 'MT5_AUTOTRADING_NOT_ALLOWED', account: health.account });
         }
         if (settings.forexMaxEntriesPerSymbol !== 1 && !health.account.hedging) {
-          return res.status(409).json({
-            error: 'MT5_HEDGING_REQUIRED_FOR_RETESTS',
-            account: health.account,
-          });
+          return res.status(409).json({ error: 'MT5_HEDGING_REQUIRED_FOR_RETESTS', account: health.account });
         }
       } catch (error) {
         return res.status(409).json({ error: 'MT5_BRIDGE_CONNECTION_REQUIRED', detail: errorMessage(error) });
@@ -266,6 +277,30 @@ app.post('/api/scanners/forex/run', async (_req, res) => {
     res.json({ ok: true, scanner: loadEngineState('forexScanner') });
   } catch (error) {
     res.status(500).json({ error: errorMessage(error) });
+  }
+});
+
+app.get('/api/backtests', (req, res) => {
+  const limit = Number(req.query.limit ?? 20);
+  res.json({ ok: true, runs: historicalBacktest.list(limit) });
+});
+
+app.get('/api/backtests/:id', (req, res) => {
+  const run = historicalBacktest.get(String(req.params.id));
+  if (!run) return res.status(404).json({ error: 'BACKTEST_NOT_FOUND' });
+  res.json({ ok: true, run });
+});
+
+app.post('/api/backtests', (req, res) => {
+  try {
+    const body = backtestSchema.parse(req.body);
+    if (body.broker === 'MT5' && !vault.getMt5(workspaceId) && !env.MT5_BRIDGE_URL) {
+      return res.status(409).json({ error: 'MT5_BRIDGE_REQUIRED_FOR_BACKTEST' });
+    }
+    const id = historicalBacktest.create(body);
+    res.status(202).json({ ok: true, id, run: historicalBacktest.get(id) });
+  } catch (error) {
+    res.status(400).json({ error: errorMessage(error) });
   }
 });
 
