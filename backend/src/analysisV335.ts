@@ -2,14 +2,11 @@ import type { Candle, AnalysisSignal, RollingBacktestResult } from './analysis.j
 import { analyzeHighWinrateM5M15 } from './strategyModelR10.js';
 
 const ENTRY_TIMEFRAME_MINUTES = 5;
+const HTF_TIMEFRAME_MINUTES = 15;
 const ROLLING_HOLD_MINUTES = 45;
 const ROLLING_MAX_HOLD_BARS = Math.max(1, Math.ceil(ROLLING_HOLD_MINUTES / ENTRY_TIMEFRAME_MINUTES));
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
-/**
- * Compatibility export used by scanners/audits. R10 restores the supplied
- * high-winrate Sweep/Reclaim/MSS idea, adapted to M5 entry + M15 bias only.
- */
 export function analyzeStructureStrategyV335(
   ltfCandles: Candle[],
   htfCandles: Candle[],
@@ -21,8 +18,9 @@ export function analyzeStructureStrategyV335(
 
 /**
  * Sequential rolling evaluation that mirrors live execution.
- * Positive terminal PnL at the 45-minute horizon counts as a win; the old R9
- * evaluator incorrectly counted all non-TP outcomes as non-wins, depressing WR.
+ * - M5 signal is evaluated only after its close.
+ * - M15 bias uses only M15 candles already closed at that M5 close (no look-ahead).
+ * - Positive terminal PnL after 45 minutes counts as a win, matching the supplied evaluator.
  */
 export function runRollingBacktestV335(
   symbol: string,
@@ -46,9 +44,11 @@ export function runRollingBacktestV335(
 
   let i = Math.max(80, length - 260);
   while (i < length - 1) {
-    const currentTime = candles[i].time;
+    const signalTime = candles[i].time + ENTRY_TIMEFRAME_MINUTES * 60_000;
     const ltfSlice = candles.slice(Math.max(0, i - 179), i + 1);
-    const htfSlice = htf.length ? htf.filter((c) => c.time <= currentTime).slice(-180) : [];
+    const htfSlice = htf.length
+      ? htf.filter((c) => c.time + HTF_TIMEFRAME_MINUTES * 60_000 <= signalTime).slice(-180)
+      : [];
     if (htf.length && htfSlice.length < 60) { i++; continue; }
 
     const signal = analyzeStructureStrategyV335(ltfSlice, htfSlice.length ? htfSlice : ltfSlice, symbol);
