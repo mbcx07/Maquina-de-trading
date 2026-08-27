@@ -55,7 +55,33 @@ export class BinanceMarketDataClient {
     return mapKlines(rows);
   }
 
+  async getMarkPriceKlines(symbol: string, interval: BinanceInterval, limit: number): Promise<Candle[]> {
+    const rows = await this.getJson<any[]>(
+      `/fapi/v1/markPriceKlines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${Math.max(1, Math.min(1500, limit))}`,
+    );
+    return mapKlines(rows);
+  }
+
   async getKlinesRange(
+    symbol: string,
+    interval: BinanceInterval,
+    startTime: number,
+    endTime: number,
+  ): Promise<Candle[]> {
+    return this.getRange('/fapi/v1/klines', symbol, interval, startTime, endTime);
+  }
+
+  async getMarkPriceKlinesRange(
+    symbol: string,
+    interval: BinanceInterval,
+    startTime: number,
+    endTime: number,
+  ): Promise<Candle[]> {
+    return this.getRange('/fapi/v1/markPriceKlines', symbol, interval, startTime, endTime);
+  }
+
+  private async getRange(
+    endpoint: '/fapi/v1/klines' | '/fapi/v1/markPriceKlines',
     symbol: string,
     interval: BinanceInterval,
     startTime: number,
@@ -69,7 +95,7 @@ export class BinanceMarketDataClient {
 
     while (cursor <= endTime) {
       const rows = await this.getJson<any[]>(
-        `/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&startTime=${Math.floor(cursor)}&endTime=${Math.floor(endTime)}&limit=1500`,
+        `${endpoint}?symbol=${encodeURIComponent(symbol)}&interval=${interval}&startTime=${Math.floor(cursor)}&endTime=${Math.floor(endTime)}&limit=1500`,
       );
       const batch = mapKlines(rows).filter((candle) => candle.time >= startTime && candle.time <= endTime);
       if (!batch.length) break;
@@ -117,7 +143,7 @@ function mapKlines(rows: any[]): Candle[] {
     high: Number(row[2]),
     low: Number(row[3]),
     close: Number(row[4]),
-    volume: Number(row[5]),
+    volume: Number(row[5] ?? 0),
   })).filter((candle) => Number.isFinite(candle.time) && Number.isFinite(candle.close));
 }
 
