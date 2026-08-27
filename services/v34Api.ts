@@ -35,10 +35,14 @@ export const v34Api = {
     method: 'PUT',
     body: JSON.stringify({ botToken, chatId }),
   }),
-  testIntegration: (provider: 'binance' | 'telegram') => request<any>(`/api/integrations/${provider}/test`, {
+  saveMt5Integration: (bridgeUrl: string, bridgeToken: string) => request<any>('/api/integrations/mt5', {
+    method: 'PUT',
+    body: JSON.stringify({ bridgeUrl, bridgeToken }),
+  }),
+  testIntegration: (provider: 'binance' | 'telegram' | 'mt5') => request<any>(`/api/integrations/${provider}/test`, {
     method: 'POST',
   }),
-  removeIntegration: (provider: 'binance' | 'telegram') => request<any>(`/api/integrations/${provider}`, {
+  removeIntegration: (provider: 'binance' | 'telegram' | 'mt5') => request<any>(`/api/integrations/${provider}`, {
     method: 'DELETE',
   }),
 };
