@@ -17,6 +17,7 @@ const EXPANDED_DEFAULTS = [
   'XAUUSD', 'NAS100',
 ];
 const BASIC_DAILY_BUDGET_TARGET = 720;
+const ENTRY_TIMEFRAME_MINUTES = 5;
 const RECENT_SETUP_LOOKBACK_MINUTES = 30;
 
 interface TriggeredSignal {
@@ -62,15 +63,15 @@ export class ForexMarketScanner {
     this.ensureExpandedDefaults();
     const settings = this.getSettings();
     if (!settings.engineEnabled && !forceManual) {
-      this.saveState({ status: 'PAUSED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, performance: this.tracker.summary(20) });
+      this.saveState({ status: 'PAUSED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, timeframe: '5m/15m', performance: this.tracker.summary(20) });
       return;
     }
     if (!settings.forexEnabled) {
-      this.saveState({ status: 'DISABLED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, performance: this.tracker.summary(20) });
+      this.saveState({ status: 'DISABLED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, timeframe: '5m/15m', performance: this.tracker.summary(20) });
       return;
     }
     if (!this.market.hasCredentials()) {
-      this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, performance: this.tracker.summary(20) });
+      this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, timeframe: '5m/15m', performance: this.tracker.summary(20) });
       return;
     }
 
@@ -86,14 +87,14 @@ export class ForexMarketScanner {
 
     try {
       this.saveState({
-        status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
+        status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true, timeframe: '5m/15m',
         trigger: forceManual ? 'API_FORCE' : 'AUTOMATIC',
         telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, total: symbols.length, scanned: 0, signals: 0, errors: 0,
         configuredIntervalMinutes: settings.forexSignalScanIntervalMinutes,
         effectiveIntervalMinutes,
         estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
-        requestModel: 'ONE_M1_REQUEST_DERIVE_M15',
+        requestModel: 'ONE_M5_REQUEST_DERIVE_M15',
         recentSetupLookbackMinutes: RECENT_SETUP_LOOKBACK_MINUTES,
         symbols,
         performance: this.tracker.summary(20),
@@ -117,7 +118,7 @@ export class ForexMarketScanner {
         }
 
         this.saveState({
-          status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
+          status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true, timeframe: '5m/15m',
           trigger: forceManual ? 'API_FORCE' : 'AUTOMATIC',
           telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
           startedAt, total: symbols.length, scanned, current: symbol,
@@ -125,7 +126,7 @@ export class ForexMarketScanner {
           configuredIntervalMinutes: settings.forexSignalScanIntervalMinutes,
           effectiveIntervalMinutes,
           estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
-          requestModel: 'ONE_M1_REQUEST_DERIVE_M15',
+          requestModel: 'ONE_M5_REQUEST_DERIVE_M15',
           recentSetupLookbackMinutes: RECENT_SETUP_LOOKBACK_MINUTES,
           performance: this.tracker.summary(20),
         });
@@ -170,12 +171,12 @@ export class ForexMarketScanner {
       const diagnostic = rateLimited
         ? 'TWELVE_DATA_RATE_LIMIT_OR_DAILY_QUOTA'
         : freshSignals.length === 0 && errors === 0
-          ? 'NO_ACTIONABLE_SETUP_IN_RECENT_WINDOW'
+          ? 'NO_ACTIONABLE_M5_M15_SETUP_IN_RECENT_WINDOW'
           : undefined;
 
       this.saveState({
         status,
-        mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
+        mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true, timeframe: '5m/15m',
         trigger: forceManual ? 'API_FORCE' : 'AUTOMATIC',
         telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, completedAt: Date.now(), total: symbols.length, scanned,
@@ -186,7 +187,7 @@ export class ForexMarketScanner {
         effectiveIntervalMinutes,
         estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
         nextScanMinutes: effectiveIntervalMinutes,
-        requestModel: 'ONE_M1_REQUEST_DERIVE_M15',
+        requestModel: 'ONE_M5_REQUEST_DERIVE_M15',
         recentSetupLookbackMinutes: RECENT_SETUP_LOOKBACK_MINUTES,
         symbols,
         performance: this.tracker.summary(40),
@@ -202,7 +203,7 @@ export class ForexMarketScanner {
       await this.runCycle(false);
     } catch (error) {
       this.saveState({
-        status: 'ERROR', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
+        status: 'ERROR', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true, timeframe: '5m/15m',
         error: error instanceof Error ? error.message : String(error), at: Date.now(),
         performance: this.tracker.summary(20),
       });
@@ -220,7 +221,7 @@ export class ForexMarketScanner {
   private async scanSymbol(symbol: string): Promise<Opportunity | null> {
     const { ltf, htf, dataSymbol } = await this.market.dualRates(symbol);
     if (ltf.length < 100 || htf.length < 210) {
-      throw new Error(`FOREX_INSUFFICIENT_CANDLES:${symbol}:${dataSymbol}:ltf=${ltf.length}:htf=${htf.length}`);
+      throw new Error(`FOREX_INSUFFICIENT_CANDLES:${symbol}:${dataSymbol}:m5=${ltf.length}:m15=${htf.length}`);
     }
 
     this.tracker.updateFromCandles(symbol, ltf);
@@ -242,7 +243,7 @@ export class ForexMarketScanner {
     const rollingWinRate = backtest.tradesEvaluated === 0 ? rebased.confidence : backtest.winRate;
     const score = opportunityScore(rebased, backtest, 60);
     const fingerprint = sha256([
-      'FOREX-SIGNAL-R9', symbol, dataSymbol, rebased.side, rebased.strategy, String(triggered.candleTime),
+      'FOREX-SIGNAL-M5-M15', symbol, dataSymbol, rebased.side, rebased.strategy, String(triggered.candleTime),
       roundKey(rebased.stopLoss), roundKey(rebased.takeProfit),
     ].join('|'));
 
@@ -253,7 +254,7 @@ export class ForexMarketScanner {
       broker: 'MT5',
       symbol,
       side: rebased.side,
-      timeframe: '1m/15m',
+      timeframe: '5m/15m',
       strategy: rebased.strategy,
       confidence: rebased.confidence,
       rollingWinRate,
@@ -276,7 +277,7 @@ export class ForexMarketScanner {
         candleTime: triggered.candleTime,
         triggerLagMinutes: triggered.triggerLagMinutes,
         reanchoredAtCurrentPrice: triggered.triggerLagMinutes > 0,
-        decisionWindows: { m1: 100, m15: 210 },
+        decisionWindows: { m5: 100, m15: 210 },
       },
     };
   }
@@ -355,7 +356,8 @@ function findLatestActionableSignal(
   lookbackMinutes: number,
 ): TriggeredSignal | null {
   const lastIndex = ltf.length - 1;
-  const firstIndex = Math.max(99, lastIndex - Math.max(0, lookbackMinutes));
+  const lookbackBars = Math.max(1, Math.ceil(lookbackMinutes / ENTRY_TIMEFRAME_MINUTES));
+  const firstIndex = Math.max(99, lastIndex - lookbackBars);
   const currentPrice = ltf[lastIndex]?.close ?? 0;
 
   for (let i = lastIndex; i >= firstIndex; i--) {
