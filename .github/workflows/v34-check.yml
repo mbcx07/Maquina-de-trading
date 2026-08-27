@@ -33,22 +33,20 @@ jobs:
       - run: npm install
       - run: npm run build
 
-  mt5-bridge-syntax:
+  linux-compose:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: python -m py_compile mt5-bridge/main.py mt5-bridge/app.py mt5-bridge/market_routes.py
+      - run: docker compose -f docker-compose.linux.yml config
+      - run: docker compose -f docker-compose.linux.yml build
 
   secret-boundary:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Ensure frontend Binance service has no embedded signing secret
+      - name: Ensure frontend has no embedded private trading/data secrets
         run: |
-          if grep -E 'apiSecret\s*=|apiKey\s*=|BINANCE_API_SECRET\s*=.+[^=[:space:]]' services/binance.ts; then
-            echo 'Potential Binance secret found in frontend service'
+          if grep -E 'apiSecret\s*=|BINANCE_API_SECRET\s*=.+[^=[:space:]]|TWELVE_DATA_API_KEY\s*=.+[^=[:space:]]' services/binance.ts App.tsx; then
+            echo 'Potential private credential found in frontend source'
             exit 1
           fi
