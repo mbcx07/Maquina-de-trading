@@ -18,14 +18,20 @@ const envSchema = z.object({
   MT5_BRIDGE_URL: z.string().url().default('http://127.0.0.1:8790'),
   MT5_BRIDGE_TOKEN: z.string().default(''),
 
-  // User rule: Binance can run up to ten simultaneous positions and each symbol is unique.
   CRYPTO_MAX_TRADES: z.coerce.number().int().min(1).max(10).default(10),
   CRYPTO_MARGIN_PCT: z.coerce.number().positive().max(100).default(1),
   CRYPTO_REQUESTED_LEVERAGE: z.coerce.number().int().min(1).max(125).default(20),
   CRYPTO_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
   CRYPTO_MIN_WINRATE: z.coerce.number().min(0).max(100).default(75),
+
+  FOREX_SYMBOLS: z.string().default('EURUSD,GBPUSD,USDJPY,USDCHF,USDCAD,AUDUSD,NZDUSD,EURJPY,GBPJPY,EURGBP,EURNZD,GBPNZD'),
   FOREX_MAX_TRADES: z.coerce.number().int().min(1).max(200).default(20),
   FOREX_MAX_ENTRIES_PER_SYMBOL: z.coerce.number().int().min(0).max(50).default(0),
+  FOREX_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
+  FOREX_MIN_WINRATE: z.coerce.number().min(0).max(100).default(70),
+
+  DAILY_LOSS_LIMIT_PCT: z.coerce.number().positive().max(100).default(5),
+  MAX_DRAWDOWN_PCT: z.coerce.number().positive().max(100).default(15),
 });
 
 export const env = envSchema.parse(process.env);
@@ -34,6 +40,10 @@ export function defaultSettings(): EngineSettings {
   return {
     appMode: env.APP_MODE,
     engineEnabled: false,
+
+    riskKillSwitchEnabled: true,
+    dailyLossLimitPct: env.DAILY_LOSS_LIMIT_PCT,
+    maxDrawdownPct: env.MAX_DRAWDOWN_PCT,
 
     cryptoEnabled: true,
     maxConcurrentCryptoTrades: env.CRYPTO_MAX_TRADES,
@@ -45,10 +55,13 @@ export function defaultSettings(): EngineSettings {
     cryptoMinRollingWinRate: env.CRYPTO_MIN_WINRATE,
 
     forexEnabled: true,
+    forexSymbols: env.FOREX_SYMBOLS.split(',').map((symbol) => symbol.trim()).filter(Boolean),
     maxConcurrentForexTrades: env.FOREX_MAX_TRADES,
     forexMaxEntriesPerSymbol: env.FOREX_MAX_ENTRIES_PER_SYMBOL,
     forexRiskMode: 'RISK_TO_SL',
     forexPctPerTrade: 1,
+    forexMinSignalConfidence: env.FOREX_MIN_CONFIDENCE,
+    forexMinRollingWinRate: env.FOREX_MIN_WINRATE,
     forexMagicNumber: 340034,
     forexMaxDeviationPoints: 20,
   };
