@@ -37,11 +37,11 @@ export class CryptoMarketScanner {
     if (this.running) return;
     const settings = this.getSettings();
     if (!settings.engineEnabled) {
-      this.saveState({ status: 'PAUSED', strategy: 'V33.5_STRUCTURAL_FUTURES_R8', updatedAt: Date.now() });
+      this.saveState({ status: 'PAUSED', strategy: 'V33.5_M5_M15_FUTURES_R9', timeframe: '5m/15m', updatedAt: Date.now() });
       return;
     }
     if (!settings.cryptoEnabled) {
-      this.saveState({ status: 'DISABLED', strategy: 'V33.5_STRUCTURAL_FUTURES_R8', updatedAt: Date.now() });
+      this.saveState({ status: 'DISABLED', strategy: 'V33.5_M5_M15_FUTURES_R9', timeframe: '5m/15m', updatedAt: Date.now() });
       return;
     }
 
@@ -49,25 +49,22 @@ export class CryptoMarketScanner {
     const audit = this.qualification.getState();
     const qualified = new Set((audit.qualifiedSymbols ?? []).map((symbol) => symbol.toUpperCase()));
 
-    // Each symbol is individually backtested before it enters qualifiedSymbols. We can
-    // safely trade already-qualified symbols while the rest of the universe continues
-    // auditing; waiting for the very last coin unnecessarily left the engine idle.
     if (qualified.size === 0) {
       if (audit.status === 'COMPLETED') {
         this.saveState({
           status: 'NO_QUALIFIED_SYMBOLS',
-          strategy: 'V33.5_STRUCTURAL_FUTURES_R8',
+          strategy: 'V33.5_M5_M15_FUTURES_R9', timeframe: '5m/15m',
           qualification: 'PROFITABLE_ONLY',
           auditCompletedAt: audit.completedAt,
           auditProgress: { completed: audit.completed ?? 0, total: audit.total ?? 0 },
           qualifiedUniverse: 0,
           completedAt: Date.now(),
-          message: 'El backtest no tiene todavía símbolos rentables aprobados. No se abre ninguna operación.',
+          message: 'El backtest M5/M15 no tiene todavía símbolos rentables aprobados. No se abre ninguna operación.',
         });
       } else {
         this.saveState({
           status: 'WAITING_UNIVERSE_AUDIT',
-          strategy: 'V33.5_STRUCTURAL_FUTURES_R8',
+          strategy: 'V33.5_M5_M15_FUTURES_R9', timeframe: '5m/15m',
           auditStatus: audit.status,
           startedAt: audit.startedAt,
           completedAt: audit.completedAt,
@@ -76,7 +73,7 @@ export class CryptoMarketScanner {
           current: audit.current ?? null,
           qualifiedUniverse: 0,
           auditError: audit.error,
-          message: 'Esperando la primera moneda que termine su backtest individual con resultado rentable.',
+          message: 'Esperando la primera moneda que termine su backtest individual M5/M15 con resultado rentable.',
         });
       }
       return;
@@ -107,12 +104,12 @@ export class CryptoMarketScanner {
       const liquidity = liquidityPercentiles(symbols, tickerMap);
 
       this.saveState({
-        status: 'SCANNING', strategy: 'V33.5_STRUCTURAL_FUTURES_R8', qualification: qualificationMode,
+        status: 'SCANNING', strategy: 'V33.5_M5_M15_FUTURES_R9', timeframe: '5m/15m', qualification: qualificationMode,
         startedAt, total: symbols.length, universeTotal: allSymbols.length, liquidUniverse: liquidSymbols.length,
         qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified], minQuoteVolume24h: 2_000_000,
         auditProgress: { status: audit.status, completed: audit.completed ?? 0, total: audit.total ?? 0, current: audit.current },
         scanned: 0, opportunities: 0, revalidated: 0, selected: 0, executed: 0, errors: 0,
-        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
+        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS_M5',
       });
 
       const chunkSize = 4;
@@ -130,12 +127,12 @@ export class CryptoMarketScanner {
         }
 
         this.saveState({
-          status: 'SCANNING', strategy: 'V33.5_STRUCTURAL_FUTURES_R8', qualification: qualificationMode,
+          status: 'SCANNING', strategy: 'V33.5_M5_M15_FUTURES_R9', timeframe: '5m/15m', qualification: qualificationMode,
           startedAt, total: symbols.length, universeTotal: allSymbols.length, liquidUniverse: liquidSymbols.length,
           qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified], scanned,
           current: chunk.at(-1) ?? null, opportunities: opportunities.length, revalidated: 0, selected: 0, executed: 0, errors,
           auditProgress: { status: audit.status, completed: audit.completed ?? 0, total: audit.total ?? 0, current: audit.current },
-          exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
+          exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS_M5',
         });
 
         if (i + chunkSize < symbols.length) await sleep(850);
@@ -169,7 +166,7 @@ export class CryptoMarketScanner {
       const executed = result.executionResults.filter((item) => item.broker === 'BINANCE' && item.ok === true).length;
 
       this.saveState({
-        status: 'IDLE', strategy: 'V33.5_STRUCTURAL_FUTURES_R8', qualification: qualificationMode,
+        status: 'IDLE', strategy: 'V33.5_M5_M15_FUTURES_R9', timeframe: '5m/15m', qualification: qualificationMode,
         startedAt, completedAt: Date.now(), total: symbols.length, universeTotal: allSymbols.length,
         liquidUniverse: liquidSymbols.length, qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified],
         auditProgress: { status: audit.status, completed: audit.completed ?? 0, total: audit.total ?? 0, current: audit.current },
@@ -180,7 +177,7 @@ export class CryptoMarketScanner {
         errors,
         lastExecutionErrors: executionErrors.slice(-8),
         diagnostic: opportunities.length === 0
-          ? 'NO_VALID_SETUP_IN_QUALIFIED_SYMBOLS'
+          ? 'NO_VALID_M5_M15_SETUP_IN_QUALIFIED_SYMBOLS'
           : freshOpportunities.length === 0
             ? 'SETUPS_BECAME_STALE_ON_REVALIDATION'
             : result.selected.crypto.length === 0
@@ -188,14 +185,14 @@ export class CryptoMarketScanner {
               : executed === 0 && executionErrors.length
                 ? 'EXECUTION_REJECTED'
                 : undefined,
-        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
+        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS_M5',
       });
     } catch (error) {
       this.saveState({
-        status: 'ERROR', strategy: 'V33.5_STRUCTURAL_FUTURES_R8', startedAt, completedAt: Date.now(),
+        status: 'ERROR', strategy: 'V33.5_M5_M15_FUTURES_R9', timeframe: '5m/15m', startedAt, completedAt: Date.now(),
         scanned, opportunities: opportunities.length, errors: errors + 1,
         error: error instanceof Error ? error.message : String(error),
-        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
+        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS_M5',
       });
       throw error;
     } finally {
@@ -234,7 +231,7 @@ export class CryptoMarketScanner {
       : backtest.score + Math.max(0, Math.min(100, liquidityScore)) * 0.001;
     const candleTime = ltf.at(-1)?.time ?? Date.now();
     const fingerprint = sha256([
-      'BINANCE-V335-STRUCTURAL', symbol, signal.side, signal.strategy, String(candleTime),
+      'BINANCE-V335-M5-M15', symbol, signal.side, signal.strategy, String(candleTime),
       roundKey(signal.stopLoss), roundKey(signal.takeProfit),
     ].join('|'));
     const exitDisplay = exitDisplayProfile(
@@ -251,16 +248,16 @@ export class CryptoMarketScanner {
       id: `OP-BN-${fingerprint.slice(0, 24)}`,
       signalId: `SIG-BN-${fingerprint.slice(0, 24)}`,
       signalFingerprint: fingerprint,
-      broker: 'BINANCE', symbol, side: signal.side, timeframe: '1m/15m', strategy: signal.strategy,
+      broker: 'BINANCE', symbol, side: signal.side, timeframe: '5m/15m', strategy: signal.strategy,
       confidence: signal.confidence, rollingWinRate, expectancy: backtest.expectancyPct, score,
       entry: signal.entry, stopLoss: signal.stopLoss, takeProfit: signal.takeProfit, tp2: signal.tp2, tp3: signal.tp3,
       createdAt: Date.now(),
       metadata: {
         reason: signal.reason, atr: signal.atr, backtest, liquidityScore,
         rollingWinRateSource: backtest.tradesEvaluated === 0 ? 'SIGNAL_CONFIDENCE_NO_HISTORY' : 'ROLLING_BACKTEST_V335',
-        strategyCompatibility: 'V33.5_ORIGINAL_SETUP_AND_EXITS', trendSource: `${symbol}:M15_EMA20_50_200`,
-        decisionWindows: { m1: 100, m15: 210 }, candleTime,
-        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
+        strategyCompatibility: 'V33.5_SETUP_ON_M5_TREND_ON_M15', trendSource: `${symbol}:M15_EMA20_50_200`,
+        decisionWindows: { m5: 100, m15: 210 }, candleTime,
+        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS_M5',
         exitDisplay,
       },
     };
@@ -303,7 +300,7 @@ function exitDisplayProfile(
     tp2MarginRoePct: tp2PricePct * lev,
     tp3MarginRoePct: tp3PricePct * lev,
     leverage: lev,
-    note: 'Price distance is structural; leverage only amplifies margin ROE/PnL.',
+    note: 'M5 structural price distance; leverage only amplifies margin ROE/PnL.',
   };
 }
 
