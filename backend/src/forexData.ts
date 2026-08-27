@@ -51,9 +51,11 @@ export class ForexDataClient {
   }
 
   async dualRates(symbol: string): Promise<{ ltf: Candle[]; htf: Candle[] }> {
+    // Match the original v33.5 decision windows exactly so EMA state, trend and
+    // structural levels are calculated from the same amount of history.
     const [ltf, htf] = await Promise.all([
-      this.getRates(symbol, '1min', 220),
-      this.getRates(symbol, '15min', 260),
+      this.getRates(symbol, '1min', 100),
+      this.getRates(symbol, '15min', 210),
     ]);
     return { ltf, htf };
   }
