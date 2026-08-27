@@ -3,6 +3,7 @@ import type { Candle } from './analysis.js';
 import type { TradeSide } from './types.js';
 
 const ENTRY_TIMEFRAME_MINUTES = 5;
+const HTF_TIMEFRAME_MINUTES = 15;
 const AUDIT_MODEL = 'R10_HIGH_WINRATE_SWEEP_M5_M15_H45';
 
 export interface AuditTrade {
@@ -63,8 +64,6 @@ export const defaultAuditRules = (startTime: number, endTime: number): AuditRule
   scanStepMinutes: 5,
   maxHoldMinutes: 45,
   roundTripCostPct: 0.12,
-  // Original high-winrate model used 64% as the minimum positive OOS floor
-  // and 70% as the strict target. Admission starts at the proven floor.
   minRollingWinRate: 64,
   minSignalConfidence: 74,
   minTrades: 5,
@@ -85,7 +84,9 @@ export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], ru
     if (current.time < rules.startTime || current.time > rules.endTime) continue;
     if (current.time < busyUntil) continue;
 
-    const htfEnd = upperBoundTime(h, current.time);
+    const signalTime = current.time + ENTRY_TIMEFRAME_MINUTES * 60_000;
+    const latestClosedHtfOpen = signalTime - HTF_TIMEFRAME_MINUTES * 60_000;
+    const htfEnd = upperBoundTime(h, latestClosedHtfOpen);
     if (htfEnd < 210) continue;
 
     const ltfWindow = l.slice(i - 99, i + 1);
