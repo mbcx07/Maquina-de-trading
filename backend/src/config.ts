@@ -18,7 +18,8 @@ const envSchema = z.object({
   MT5_BRIDGE_URL: z.string().url().default('http://127.0.0.1:8790'),
   MT5_BRIDGE_TOKEN: z.string().default(''),
 
-  CRYPTO_MAX_TRADES: z.coerce.number().int().min(1).max(50).default(10),
+  // User rule: Binance can run up to ten simultaneous positions and each symbol is unique.
+  CRYPTO_MAX_TRADES: z.coerce.number().int().min(1).max(10).default(10),
   CRYPTO_MARGIN_PCT: z.coerce.number().positive().max(100).default(1),
   CRYPTO_REQUESTED_LEVERAGE: z.coerce.number().int().min(1).max(125).default(20),
   CRYPTO_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
