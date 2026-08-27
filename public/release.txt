@@ -1,4 +1,4 @@
 QUANTUM DUAL V34 LINUX
-Release: 2026.08.27-R6
+Release: 2026.08.27-R7
 Branch: feature/v34-dual-market-engine
-Includes: visible BUILD R6 badge + browser title version, original V33.5 100xM1/210xM15 windows, PAPER anti-microclose, Binance profitable-only universe audit, Binance 418/429 cooldown + safe audit pacing, Crypto OFF prevents automatic universe audit startup, Forex analysis independent of Telegram, no-cache frontend shell.
+Includes: visible BUILD R7 badge + browser title version, original V33.5 setup/tendency filters, Crypto Futures SL floor 1.0% underlying price, TP1 floor 1.5% underlying price, leverage-aware margin ROI diagnostics, exit revalidation at actual fill, PAPER/REAL/universe-audit aligned to the same Futures exit profile, PAPER anti-microclose, Binance profitable-only universe audit, Binance 418/429 cooldown + safe audit pacing, Forex analysis independent of Telegram, no-cache frontend shell.
