@@ -73,7 +73,7 @@ export class ForexDataClient {
   }
 
   async testConnection(): Promise<{ ok: true; provider: 'TWELVE_DATA'; symbol: string; lastPrice: number; usage: ForexDataUsage }> {
-    const candles = await this.getRates('EURUSD', '1min', 2);
+    const candles = await this.getRates('EURUSD', '5min', 2);
     const last = candles.at(-1);
     if (!last) throw new Error('TWELVE_DATA_NO_FOREX_DATA');
     return {
@@ -89,16 +89,17 @@ export class ForexDataClient {
     const dataSymbol = await this.resolveDataSymbol(symbol);
     await this.waitForCreditCapacity(1);
 
-    // One sufficiently deep M1 series contains everything needed to reconstruct the
-    // exact 15-minute OHLC bars locally. This halves REST credit consumption versus
-    // requesting M1 and M15 separately and lets the automatic scanner run more often.
-    const rawM1 = await this.getRatesResolved(dataSymbol, '1min', 3500);
-    const aggregatedM15 = aggregateCandles(rawM1, 15);
-    const ltf = rawM1.slice(-180);
-    const htf = aggregatedM15.slice(-230);
+    // M5 is the entry/structure timeframe. Build M15 locally from the same M5 series,
+    // keeping one Twelve Data credit per instrument instead of requesting two series.
+    // 700 x M5 bars provide enough history for 210 closed M15 bars plus the 100-bar M5 window.
+    const rawM5 = await this.getRatesResolved(dataSymbol, '5min', 700);
+    const closedM5 = closedCandles(rawM5, 5 * 60_000);
+    const aggregatedM15 = closedCandles(aggregateCandles(closedM5, 15), 15 * 60_000);
+    const ltf = closedM5.slice(-100);
+    const htf = aggregatedM15.slice(-210);
 
     if (ltf.length < 100 || htf.length < 210) {
-      throw new Error(`TWELVE_DATA_INSUFFICIENT_AGGREGATED_HISTORY:${symbol}:${dataSymbol}:m1=${ltf.length}:m15=${htf.length}`);
+      throw new Error(`TWELVE_DATA_INSUFFICIENT_M5_M15_HISTORY:${symbol}:${dataSymbol}:m5=${ltf.length}:m15=${htf.length}`);
     }
     return { ltf, htf, dataSymbol };
   }
@@ -272,6 +273,11 @@ function aggregateCandles(candles: Candle[], minutes: number): Candle[] {
     current.volume += candle.volume;
   }
   return [...buckets.values()].sort((a, b) => a.time - b.time);
+}
+
+function closedCandles(candles: Candle[], intervalMs: number): Candle[] {
+  const now = Date.now();
+  return candles.filter((candle) => candle.time + intervalMs <= now);
 }
 
 function normalizeInputSymbol(symbol: string): string {
