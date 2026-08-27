@@ -140,20 +140,27 @@ export class BinanceMarketDataClient {
     return dedupeCandles(output);
   }
 
-  /** Exact live data window used by the original v33.5 browser engine. */
+  /**
+   * Decision data for the trading strategy.
+   * M5 is the entry/structure timeframe; M15 is the independent trend filter.
+   * The currently-forming candle is excluded so the signal is based on closed bars.
+   */
   async getDualKlines(symbol: string): Promise<{ ltf: Candle[]; htf: Candle[] }> {
-    const [ltf, htf] = await Promise.all([
-      this.getKlines(symbol, '1m', 100),
-      this.getKlines(symbol, '15m', 210),
+    const [ltfRaw, htfRaw] = await Promise.all([
+      this.getKlines(symbol, '5m', 101),
+      this.getKlines(symbol, '15m', 211),
     ]);
-    return { ltf, htf };
+    return {
+      ltf: closedCandles(ltfRaw, 5 * 60_000, 100),
+      htf: closedCandles(htfRaw, 15 * 60_000, 210),
+    };
   }
 
   async getDualHistoricalRange(symbol: string, startTime: number, endTime: number): Promise<{ ltf: Candle[]; htf: Candle[] }> {
     const warmupStart = startTime - 15 * 60_000 * 210;
     // Sequential on purpose: a full-universe audit must not burst two paginated
     // historical streams from the same IP at the same time.
-    const ltf = await this.getKlinesRange(symbol, '1m', Math.max(0, warmupStart), endTime);
+    const ltf = await this.getKlinesRange(symbol, '5m', Math.max(0, warmupStart), endTime);
     await sleep(750);
     const htf = await this.getKlinesRange(symbol, '15m', Math.max(0, warmupStart), endTime);
     return { ltf, htf };
@@ -176,6 +183,13 @@ function intervalToMs(interval: BinanceInterval): number {
   if (interval === '5m') return 5 * 60_000;
   if (interval === '15m') return 15 * 60_000;
   return 60 * 60_000;
+}
+
+function closedCandles(candles: Candle[], intervalMs: number, limit: number): Candle[] {
+  const now = Date.now();
+  return candles
+    .filter((candle) => candle.time + intervalMs <= now)
+    .slice(-limit);
 }
 
 function dedupeCandles(candles: Candle[]): Candle[] {
