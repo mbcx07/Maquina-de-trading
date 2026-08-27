@@ -4,7 +4,7 @@ import path from 'node:path';
 import { env } from './config.js';
 import { TradingDatabase } from './database.js';
 
-export type IntegrationProvider = 'BINANCE' | 'TELEGRAM';
+export type IntegrationProvider = 'BINANCE' | 'TELEGRAM' | 'MT5';
 
 export interface BinanceCredentials {
   apiKey: string;
@@ -14,6 +14,11 @@ export interface BinanceCredentials {
 export interface TelegramCredentials {
   botToken: string;
   chatId: string;
+}
+
+export interface Mt5BridgeCredentials {
+  bridgeUrl: string;
+  bridgeToken: string;
 }
 
 export interface IntegrationStatus {
@@ -43,10 +48,52 @@ export class IntegrationVault {
   }
 
   private ensureSchema(): void {
+    const existing = this.database.db.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'table' AND name = 'integration_credentials'
+    `).get() as { sql?: string } | undefined;
+
+    if (existing?.sql && !existing.sql.includes("'MT5'")) {
+      this.database.db.exec(`
+        BEGIN IMMEDIATE;
+        DROP INDEX IF EXISTS idx_integration_workspace;
+        ALTER TABLE integration_credentials RENAME TO integration_credentials_v34_legacy;
+
+        CREATE TABLE integration_credentials (
+          workspace_id TEXT NOT NULL,
+          provider TEXT NOT NULL CHECK (provider IN ('BINANCE','TELEGRAM','MT5')),
+          encrypted_payload TEXT NOT NULL,
+          masked_primary TEXT,
+          masked_secondary TEXT,
+          last_test_ok INTEGER,
+          last_test_at INTEGER,
+          last_error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(workspace_id, provider)
+        );
+
+        INSERT INTO integration_credentials(
+          workspace_id, provider, encrypted_payload, masked_primary, masked_secondary,
+          last_test_ok, last_test_at, last_error, created_at, updated_at
+        )
+        SELECT
+          workspace_id, provider, encrypted_payload, masked_primary, masked_secondary,
+          last_test_ok, last_test_at, last_error, created_at, updated_at
+        FROM integration_credentials_v34_legacy;
+
+        DROP TABLE integration_credentials_v34_legacy;
+        CREATE INDEX idx_integration_workspace
+          ON integration_credentials(workspace_id, provider);
+        COMMIT;
+      `);
+      return;
+    }
+
     this.database.db.exec(`
       CREATE TABLE IF NOT EXISTS integration_credentials (
         workspace_id TEXT NOT NULL,
-        provider TEXT NOT NULL CHECK (provider IN ('BINANCE','TELEGRAM')),
+        provider TEXT NOT NULL CHECK (provider IN ('BINANCE','TELEGRAM','MT5')),
         encrypted_payload TEXT NOT NULL,
         masked_primary TEXT,
         masked_secondary TEXT,
@@ -77,12 +124,24 @@ export class IntegrationVault {
     this.save(workspaceId, 'TELEGRAM', { botToken, chatId }, mask(botToken, 5, 4), mask(chatId, 3, 3));
   }
 
+  saveMt5(workspaceId: string, credentials: Mt5BridgeCredentials): void {
+    const bridgeUrl = credentials.bridgeUrl.trim().replace(/\/$/, '');
+    const bridgeToken = credentials.bridgeToken.trim();
+    if (!/^https?:\/\//i.test(bridgeUrl)) throw new Error('MT5_BRIDGE_URL_INVALID');
+    if (!bridgeToken) throw new Error('MT5_BRIDGE_TOKEN_REQUIRED');
+    this.save(workspaceId, 'MT5', { bridgeUrl, bridgeToken }, bridgeUrl, mask(bridgeToken, 3, 3));
+  }
+
   getBinance(workspaceId: string): BinanceCredentials | null {
     return this.get<BinanceCredentials>(workspaceId, 'BINANCE');
   }
 
   getTelegram(workspaceId: string): TelegramCredentials | null {
     return this.get<TelegramCredentials>(workspaceId, 'TELEGRAM');
+  }
+
+  getMt5(workspaceId: string): Mt5BridgeCredentials | null {
+    return this.get<Mt5BridgeCredentials>(workspaceId, 'MT5');
   }
 
   getStatus(workspaceId: string): IntegrationStatus[] {
@@ -95,7 +154,7 @@ export class IntegrationVault {
     `).all(workspaceId) as Array<Record<string, unknown>>;
 
     const map = new Map(rows.map((row) => [String(row.provider), row]));
-    return (['BINANCE', 'TELEGRAM'] as IntegrationProvider[]).map((provider) => {
+    return (['BINANCE', 'TELEGRAM', 'MT5'] as IntegrationProvider[]).map((provider) => {
       const row = map.get(provider);
       if (!row) return { provider, configured: false };
       return {
@@ -217,9 +276,6 @@ function loadMasterKey(): Buffer {
     return key;
   }
 
-  // Local single-node fallback. Production/membership deployments should provide
-  // INTEGRATION_MASTER_KEY through the hosting secret manager so multiple instances
-  // share the same encryption key and backups remain decryptable.
   const keyPath = path.resolve(env.LOCAL_VAULT_KEY_PATH);
   fs.mkdirSync(path.dirname(keyPath), { recursive: true });
   if (fs.existsSync(keyPath)) {
