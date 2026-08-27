@@ -55,7 +55,8 @@ const settingsPatchSchema = z.object({
   appMode: z.enum(['PAPER', 'TESTNET', 'REAL']).optional(),
   engineEnabled: z.boolean().optional(),
   cryptoEnabled: z.boolean().optional(),
-  maxConcurrentCryptoTrades: z.number().int().min(1).max(50).optional(),
+  // Hard cap from the product rule: never more than 10 simultaneous Binance coins.
+  maxConcurrentCryptoTrades: z.number().int().min(1).max(10).optional(),
   cryptoMarginPctPerTrade: z.number().positive().max(100).optional(),
   cryptoRequestedLeverage: z.number().int().min(1).max(125).optional(),
   cryptoMaxAccountExposurePct: z.number().positive().max(100).optional(),
@@ -178,7 +179,7 @@ app.post('/api/opportunities/ingest', async (req, res) => {
     const settings = getSettings();
     const activeTrades = database.getActiveTrades();
     const ctx = {
-      maxCryptoTrades: settings.maxConcurrentCryptoTrades,
+      maxCryptoTrades: Math.min(10, settings.maxConcurrentCryptoTrades),
       maxForexTrades: settings.maxConcurrentForexTrades,
       forexMaxEntriesPerSymbol: settings.forexMaxEntriesPerSymbol,
       activeTrades,
@@ -246,7 +247,7 @@ function loadTopOpportunities(broker: 'BINANCE' | 'MT5', limit: number): Opportu
       const current = best.get(opportunity.symbol);
       if (!current || opportunity.score > current.score) best.set(opportunity.symbol, opportunity);
     }
-    return [...best.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+    return [...best.values()].sort((a, b) => b.score - a.score).slice(0, Math.min(10, limit));
   }
   return parsed;
 }
