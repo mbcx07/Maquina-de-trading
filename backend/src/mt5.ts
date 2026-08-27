@@ -137,7 +137,18 @@ export class Mt5BridgeClient {
 
   rates(symbol: string, timeframe: 'M1' | 'M5' | 'M15' | 'H1', count: number): Promise<Candle[]> {
     return this.request(
-      `/market/rates/${encodeURIComponent(symbol)}?timeframe=${encodeURIComponent(timeframe)}&count=${Math.max(50, Math.min(1000, count))}`,
+      `/market/rates/${encodeURIComponent(symbol)}?timeframe=${encodeURIComponent(timeframe)}&count=${Math.max(50, Math.min(5000, count))}`,
+    );
+  }
+
+  ratesRange(
+    symbol: string,
+    timeframe: 'M1' | 'M5' | 'M15' | 'H1',
+    startTime: number,
+    endTime: number,
+  ): Promise<Candle[]> {
+    return this.request(
+      `/market/rates-range/${encodeURIComponent(symbol)}?timeframe=${encodeURIComponent(timeframe)}&start_ms=${Math.floor(startTime)}&end_ms=${Math.floor(endTime)}`,
     );
   }
 
@@ -145,6 +156,19 @@ export class Mt5BridgeClient {
     const [ltf, htf] = await Promise.all([
       this.rates(symbol, 'M1', 220),
       this.rates(symbol, 'M15', 260),
+    ]);
+    return { ltf, htf };
+  }
+
+  async dualHistoricalRange(
+    symbol: string,
+    startTime: number,
+    endTime: number,
+  ): Promise<{ ltf: Candle[]; htf: Candle[] }> {
+    const warmupStart = startTime - 15 * 60_000 * 260;
+    const [ltf, htf] = await Promise.all([
+      this.ratesRange(symbol, 'M1', warmupStart, endTime),
+      this.ratesRange(symbol, 'M15', warmupStart, endTime),
     ]);
     return { ltf, htf };
   }
