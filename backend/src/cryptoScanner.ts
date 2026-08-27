@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { analyzeStructureStrategy, opportunityScore, runRollingBacktest } from './analysis.js';
+import { analyzeStructureStrategyV335, runRollingBacktestV335 } from './analysisV335.js';
 import { BinanceMarketDataClient } from './binanceMarket.js';
 import { TradingDatabase } from './database.js';
 import { OpportunityOrchestrator } from './orchestrator.js';
@@ -49,6 +49,7 @@ export class CryptoMarketScanner {
 
       this.saveState({
         status: 'SCANNING',
+        strategy: 'V33.5_ORIGINAL_COMPAT',
         startedAt,
         total: symbols.length,
         scanned: 0,
@@ -56,8 +57,6 @@ export class CryptoMarketScanner {
         errors: 0,
       });
 
-      // Deliberately throttled: monitoring every symbol is useful only if we do not
-      // consume the entire REST rate limit and starve execution/reconciliation calls.
       const chunkSize = 4;
       for (let i = 0; i < symbols.length; i += chunkSize) {
         const chunk = symbols.slice(i, i + chunkSize);
@@ -74,6 +73,7 @@ export class CryptoMarketScanner {
 
         this.saveState({
           status: 'SCANNING',
+          strategy: 'V33.5_ORIGINAL_COMPAT',
           startedAt,
           total: symbols.length,
           scanned,
@@ -88,6 +88,7 @@ export class CryptoMarketScanner {
       const result = await this.orchestrator.process(opportunities, true);
       this.saveState({
         status: 'IDLE',
+        strategy: 'V33.5_ORIGINAL_COMPAT',
         startedAt,
         completedAt: Date.now(),
         total: symbols.length,
@@ -100,6 +101,7 @@ export class CryptoMarketScanner {
     } catch (error) {
       this.saveState({
         status: 'ERROR',
+        strategy: 'V33.5_ORIGINAL_COMPAT',
         startedAt,
         completedAt: Date.now(),
         scanned,
@@ -129,16 +131,30 @@ export class CryptoMarketScanner {
 
   private async scanSymbol(symbol: string, liquidityScore: number): Promise<Opportunity | null> {
     const { ltf, htf } = await this.market.getDualKlines(symbol);
-    if (ltf.length < 80 || htf.length < 200) return null;
+    if (ltf.length < 60 || htf.length < 50) return null;
 
-    const signal = analyzeStructureStrategy(ltf, htf, symbol);
+    const signal = analyzeStructureStrategyV335(ltf, htf, symbol);
     if (!signal) return null;
 
-    const backtest = runRollingBacktest(symbol, ltf, htf);
-    const rollingWinRate = backtest.tradesEvaluated >= 3
-      ? backtest.winRate
-      : signal.confidence;
-    const score = opportunityScore(signal, backtest, liquidityScore);
+    const settings = this.getSettings();
+    const backtest = runRollingBacktestV335(symbol, ltf, htf);
+
+    // Restore the original v33.5 admission rule exactly in spirit:
+    // - no evaluated trades => only extreme signal confidence (>=80)
+    // - one or more evaluated trades => NEVER replace actual WR with theoretical confidence
+    // This removes the V34 fallback that could turn a 0%/50% short rolling result into 80-95%.
+    const passesOriginalFilter = backtest.tradesEvaluated === 0
+      ? signal.confidence >= Math.max(80, settings.cryptoMinSignalConfidence)
+      : backtest.winRate >= settings.cryptoMinRollingWinRate &&
+        signal.confidence >= settings.cryptoMinSignalConfidence;
+
+    if (!passesOriginalFilter) return null;
+
+    const rollingWinRate = backtest.tradesEvaluated === 0 ? signal.confidence : backtest.winRate;
+    const score = backtest.tradesEvaluated === 0
+      ? signal.confidence
+      : backtest.score + Math.max(0, Math.min(100, liquidityScore)) * 0.001;
+
     const candleTime = ltf.at(-1)?.time ?? Date.now();
     const fingerprint = sha256([
       'BINANCE', symbol, signal.side, signal.strategy, String(candleTime),
@@ -169,7 +185,8 @@ export class CryptoMarketScanner {
         atr: signal.atr,
         backtest,
         liquidityScore,
-        rollingWinRateSource: backtest.tradesEvaluated >= 3 ? 'ROLLING_BACKTEST' : 'SIGNAL_CONFIDENCE_FALLBACK',
+        rollingWinRateSource: backtest.tradesEvaluated === 0 ? 'SIGNAL_CONFIDENCE_NO_HISTORY' : 'ROLLING_BACKTEST_V335',
+        strategyCompatibility: 'V33.5_ORIGINAL',
         candleTime,
       },
     };
