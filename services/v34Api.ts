@@ -45,4 +45,11 @@ export const v34Api = {
   removeIntegration: (provider: 'binance' | 'telegram' | 'mt5') => request<any>(`/api/integrations/${provider}`, {
     method: 'DELETE',
   }),
+
+  createBacktest: (payload: Record<string, unknown>) => request<any>('/api/backtests', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
+  listBacktests: (limit = 20) => request<any>(`/api/backtests?limit=${limit}`),
+  getBacktest: (id: string) => request<any>(`/api/backtests/${encodeURIComponent(id)}`),
 };
