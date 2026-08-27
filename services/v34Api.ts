@@ -35,14 +35,18 @@ export const v34Api = {
     method: 'PUT',
     body: JSON.stringify({ botToken, chatId }),
   }),
+  saveForexDataIntegration: (apiKey: string) => request<any>('/api/integrations/twelve-data', {
+    method: 'PUT',
+    body: JSON.stringify({ apiKey }),
+  }),
   saveMt5Integration: (bridgeUrl: string, bridgeToken: string) => request<any>('/api/integrations/mt5', {
     method: 'PUT',
     body: JSON.stringify({ bridgeUrl, bridgeToken }),
   }),
-  testIntegration: (provider: 'binance' | 'telegram' | 'mt5') => request<any>(`/api/integrations/${provider}/test`, {
+  testIntegration: (provider: 'binance' | 'telegram' | 'twelve-data' | 'mt5') => request<any>(`/api/integrations/${provider}/test`, {
     method: 'POST',
   }),
-  removeIntegration: (provider: 'binance' | 'telegram' | 'mt5') => request<any>(`/api/integrations/${provider}`, {
+  removeIntegration: (provider: 'binance' | 'telegram' | 'twelve-data' | 'mt5') => request<any>(`/api/integrations/${provider}`, {
     method: 'DELETE',
   }),
 
