@@ -19,7 +19,7 @@ PASSWORD = os.getenv("MT5_PASSWORD", "").strip()
 SERVER = os.getenv("MT5_SERVER", "").strip()
 TERMINAL_PATH = os.getenv("MT5_TERMINAL_PATH", "").strip()
 
-app = FastAPI(title="Maquina Trading V34 MT5 Bridge", version="0.2.0")
+app = FastAPI(title="Maquina Trading V34 MT5 Bridge", version="0.3.0")
 
 
 class SizeRequest(BaseModel):
@@ -120,6 +120,42 @@ def serialize_position(position) -> dict:
     }
 
 
+def serialize_deal(deal) -> dict:
+    data = deal._asdict()
+    return {
+        "ticket": int(data.get("ticket", 0)),
+        "order": int(data.get("order", 0)),
+        "time": int(data.get("time", 0)),
+        "timeMsc": int(data.get("time_msc", 0)),
+        "type": int(data.get("type", 0)),
+        "entry": int(data.get("entry", 0)),
+        "magic": int(data.get("magic", 0)),
+        "positionId": int(data.get("position_id", 0)),
+        "reason": int(data.get("reason", 0)),
+        "volume": float(data.get("volume", 0.0)),
+        "price": float(data.get("price", 0.0)),
+        "commission": float(data.get("commission", 0.0)),
+        "swap": float(data.get("swap", 0.0)),
+        "profit": float(data.get("profit", 0.0)),
+        "fee": float(data.get("fee", 0.0)),
+        "symbol": data.get("symbol", ""),
+        "comment": data.get("comment", ""),
+    }
+
+
+def deal_reason_name(reason: int) -> str:
+    known = {
+        getattr(mt5, "DEAL_REASON_SL", -1001): "SL",
+        getattr(mt5, "DEAL_REASON_TP", -1002): "TP",
+        getattr(mt5, "DEAL_REASON_SO", -1003): "STOP_OUT",
+        getattr(mt5, "DEAL_REASON_CLIENT", -1004): "CLIENT",
+        getattr(mt5, "DEAL_REASON_MOBILE", -1005): "MOBILE",
+        getattr(mt5, "DEAL_REASON_WEB", -1006): "WEB",
+        getattr(mt5, "DEAL_REASON_EXPERT", -1007): "EXPERT",
+    }
+    return known.get(reason, "OTHER")
+
+
 def choose_filling_modes():
     modes = []
     for name in ("ORDER_FILLING_IOC", "ORDER_FILLING_FOK", "ORDER_FILLING_RETURN"):
@@ -171,6 +207,39 @@ def positions(symbol: Optional[str] = None):
     if rows is None:
         raise HTTPException(status_code=503, detail={"error": "MT5_POSITIONS_GET_FAILED", "last_error": mt5.last_error()})
     return [serialize_position(row) for row in rows]
+
+
+@app.get("/history/{position_ticket}", dependencies=[Depends(authorize)])
+def position_history(position_ticket: int):
+    ensure_mt5()
+    rows = mt5.history_deals_get(position=position_ticket)
+    if rows is None:
+        raise HTTPException(status_code=503, detail={"error": "MT5_HISTORY_DEALS_FAILED", "last_error": mt5.last_error()})
+
+    deals = [serialize_deal(row) for row in rows]
+    deals.sort(key=lambda item: (item["timeMsc"], item["ticket"]))
+
+    close_entry_values = {
+        getattr(mt5, "DEAL_ENTRY_OUT", 1),
+        getattr(mt5, "DEAL_ENTRY_OUT_BY", 3),
+        getattr(mt5, "DEAL_ENTRY_INOUT", 2),
+    }
+    closing_deals = [deal for deal in deals if deal["entry"] in close_entry_values]
+    last_close = closing_deals[-1] if closing_deals else (deals[-1] if deals else None)
+
+    return {
+        "ticket": position_ticket,
+        "deals": deals,
+        "summary": {
+            "exitPrice": float(last_close["price"]) if last_close else None,
+            "closeTime": int(last_close["timeMsc"]) if last_close else None,
+            "profit": sum(float(deal["profit"]) for deal in deals),
+            "commission": sum(float(deal["commission"]) for deal in deals),
+            "swap": sum(float(deal["swap"]) for deal in deals),
+            "fee": sum(float(deal["fee"]) for deal in deals),
+            "closeReason": deal_reason_name(int(last_close["reason"])) if last_close else "UNKNOWN",
+        },
+    }
 
 
 @app.post("/size", dependencies=[Depends(authorize)])
