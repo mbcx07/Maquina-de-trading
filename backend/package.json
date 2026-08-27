@@ -1,11 +1,11 @@
 {
   "name": "maquina-trading-v34-backend",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/runtime.ts",
+    "start": "tsx src/runtime.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "selftest": "tsx src/selftest.ts"
