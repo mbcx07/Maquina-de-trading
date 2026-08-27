@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { BinanceUsdmClient } from './binance.js';
 import { TradingDatabase } from './database.js';
+import { calculateMetrics } from './metrics.js';
 import { TradingRepository } from './repositories.js';
 import { calculateCryptoSizing, normalizeBinanceOrderSize } from './risk.js';
 import { TelegramService } from './telegram.js';
@@ -26,7 +27,8 @@ export class CryptoExecutionService {
 
     this.repository.saveSignal(opportunity);
 
-    const activeLocal = this.database.getActiveTrades('BINANCE');
+    const activeLocal = this.database.getActiveTrades('BINANCE')
+      .filter((trade) => (trade.executionMode ?? 'REAL') === settings.appMode);
     const activeSymbols = new Set(activeLocal.map((trade) => trade.symbol.toUpperCase()));
     if (activeSymbols.size >= Math.min(10, settings.maxConcurrentCryptoTrades)) {
       this.repository.rejectOpportunity(opportunity.id, 'CRYPTO_MAX_SLOTS_REACHED');
@@ -46,7 +48,7 @@ export class CryptoExecutionService {
     const symbolMeta = this.binance.getSymbolMeta(opportunity.symbol);
 
     const futuresBalance = settings.appMode === 'PAPER'
-      ? await this.paperBalance()
+      ? this.paperBalance()
       : await this.binance.getFuturesBalance();
 
     const maxAllowedLeverage = settings.appMode === 'PAPER'
@@ -88,6 +90,7 @@ export class CryptoExecutionService {
     const reserved: TradeRecord = {
       id,
       broker: 'BINANCE',
+      executionMode: settings.appMode,
       symbol: opportunity.symbol.toUpperCase(),
       side: opportunity.side,
       strategy: opportunity.strategy,
@@ -114,6 +117,7 @@ export class CryptoExecutionService {
       metadata: {
         opportunityId: opportunity.id,
         score: opportunity.score,
+        executionMode: settings.appMode,
         risk: sizing,
         exposure: {
           activeAllocatedMargin,
@@ -143,7 +147,7 @@ export class CryptoExecutionService {
         entryPrice: fillPrice,
         openTime: Date.now(),
       });
-      this.database.addTradeEvent(id, 'ENTRY_FILLED', { brokerOrderId: orderId, quantity, leverage, fillPrice });
+      this.database.addTradeEvent(id, 'ENTRY_FILLED', { brokerOrderId: orderId, quantity, leverage, fillPrice, executionMode: settings.appMode });
 
       const exitSide: TradeSide = opportunity.side === 'BUY' ? 'SELL' : 'BUY';
       const stopClientId = clientAlgoId('SL', id);
@@ -198,13 +202,15 @@ export class CryptoExecutionService {
         leverage,
         stopClientId,
         tpClientId,
+        executionMode: settings.appMode,
       });
 
       const opened = this.database.getActiveTrades('BINANCE').find((trade) => trade.id === id);
       if (!opened) throw new Error('OPENED_TRADE_NOT_FOUND');
 
-      const usedSlots = this.database.getActiveTrades('BINANCE').length;
-      await this.telegram.tradeOpened(opened, `Crypto ${usedSlots}/${settings.maxConcurrentCryptoTrades}`)
+      const usedSlots = this.database.getActiveTrades('BINANCE')
+        .filter((trade) => (trade.executionMode ?? 'REAL') === settings.appMode).length;
+      await this.telegram.tradeOpened(opened, `${settings.appMode} Crypto ${usedSlots}/${settings.maxConcurrentCryptoTrades}`)
         .catch(() => undefined);
 
       return opened;
@@ -255,15 +261,12 @@ export class CryptoExecutionService {
     });
   }
 
-  private async paperBalance(): Promise<number> {
-    const row = this.database.db.prepare(`
-      SELECT balance FROM equity_snapshots
-      WHERE broker = 'BINANCE'
-      ORDER BY created_at DESC LIMIT 1
-    `).get() as { balance: number } | undefined;
-
-    if (row?.balance && row.balance > 0) return Number(row.balance);
-    return 100;
+  private paperBalance(): number {
+    const settings = this.getSettings();
+    const paperTrades = this.database.getRecentTrades(50_000)
+      .filter((trade) => trade.broker === 'BINANCE' && trade.executionMode === 'PAPER');
+    const metrics = calculateMetrics(paperTrades, 'BINANCE');
+    return Math.max(0, settings.paperInitialBalance + metrics.netProfit);
   }
 }
 
