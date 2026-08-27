@@ -28,7 +28,7 @@ export class CryptoExecutionService {
 
     const activeLocal = this.database.getActiveTrades('BINANCE');
     const activeSymbols = new Set(activeLocal.map((trade) => trade.symbol.toUpperCase()));
-    if (activeSymbols.size >= settings.maxConcurrentCryptoTrades) {
+    if (activeSymbols.size >= Math.min(10, settings.maxConcurrentCryptoTrades)) {
       this.repository.rejectOpportunity(opportunity.id, 'CRYPTO_MAX_SLOTS_REACHED');
       throw new Error('CRYPTO_MAX_SLOTS_REACHED');
     }
@@ -38,6 +38,7 @@ export class CryptoExecutionService {
     }
 
     if (settings.appMode !== 'PAPER') {
+      await this.assertOneWayMode();
       await this.binance.assertSymbolNotOpen(opportunity.symbol);
     }
 
@@ -67,6 +68,20 @@ export class CryptoExecutionService {
       opportunity.entry,
       symbolMeta.filters,
     );
+    const marginRequired = normalized.notional / sizing.effectiveLeverage;
+    const activeAllocatedMargin = activeLocal.reduce((sum, trade) => {
+      if (trade.marginUsed != null) return sum + Math.max(0, trade.marginUsed);
+      if (trade.notional != null && trade.leverage) return sum + Math.max(0, trade.notional / trade.leverage);
+      return sum;
+    }, 0);
+    const maxAllocatedMargin = futuresBalance * (settings.cryptoMaxAccountExposurePct / 100);
+
+    if (activeAllocatedMargin + marginRequired > maxAllocatedMargin + 1e-9) {
+      this.repository.rejectOpportunity(opportunity.id, 'CRYPTO_ACCOUNT_EXPOSURE_LIMIT');
+      throw new Error(
+        `CRYPTO_ACCOUNT_EXPOSURE_LIMIT: allocated=${activeAllocatedMargin.toFixed(4)} new=${marginRequired.toFixed(4)} max=${maxAllocatedMargin.toFixed(4)}`,
+      );
+    }
 
     const id = `BN-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     const now = Date.now();
@@ -85,7 +100,7 @@ export class CryptoExecutionService {
       tp2: opportunity.tp2,
       tp3: opportunity.tp3,
       leverage: sizing.effectiveLeverage,
-      marginUsed: normalized.notional / sizing.effectiveLeverage,
+      marginUsed: marginRequired,
       notional: normalized.notional,
       commission: 0,
       fundingOrSwap: 0,
@@ -100,13 +115,17 @@ export class CryptoExecutionService {
         opportunityId: opportunity.id,
         score: opportunity.score,
         risk: sizing,
+        exposure: {
+          activeAllocatedMargin,
+          marginRequired,
+          maxAllocatedMargin,
+        },
       },
     };
 
-    // Final concurrency guard. For BINANCE, SQLite refuses a second active row
-    // for the same symbol even if two async scans race each other.
     this.repository.createTradeAtomically(reserved);
 
+    let entryPlaced = false;
     try {
       const leverage = settings.appMode === 'PAPER'
         ? sizing.effectiveLeverage
@@ -114,14 +133,23 @@ export class CryptoExecutionService {
 
       const quantity = normalized.quantity;
       const order = await this.binance.createMarketOrder(opportunity.symbol, opportunity.side, quantity);
+      entryPlaced = true;
       const orderId = String(order.orderId ?? order.clientOrderId ?? order.paper ?? `ORDER-${Date.now()}`);
       const fillPrice = Number(order.avgPrice || order.price || opportunity.entry) || opportunity.entry;
+
+      this.repository.patchTrade(id, {
+        brokerOrderId: orderId,
+        leverage,
+        entryPrice: fillPrice,
+        openTime: Date.now(),
+      });
+      this.database.addTradeEvent(id, 'ENTRY_FILLED', { brokerOrderId: orderId, quantity, leverage, fillPrice });
 
       const exitSide: TradeSide = opportunity.side === 'BUY' ? 'SELL' : 'BUY';
       const stopClientId = clientAlgoId('SL', id);
       const tpClientId = clientAlgoId('TP', id);
 
-      await Promise.all([
+      const protections = await Promise.allSettled([
         this.binance.createCloseAllConditional(
           opportunity.symbol,
           exitSide,
@@ -137,6 +165,24 @@ export class CryptoExecutionService {
           tpClientId,
         ),
       ]);
+
+      if (protections.some((result) => result.status === 'rejected')) {
+        const protectionErrors = protections
+          .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+          .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+        this.database.addTradeEvent(id, 'PROTECTION_FAILED', { errors: protectionErrors });
+        await this.telegram.alert(
+          'CRYPTO SIN PROTECCIÓN - CIERRE DE EMERGENCIA',
+          `${opportunity.symbol}: falló SL/TP. Se ordenará cierre reduce-only inmediato.`,
+        ).catch(() => undefined);
+        await this.emergencyCloseSymbol(opportunity.symbol).catch((closeError) => {
+          this.database.addTradeEvent(id, 'EMERGENCY_CLOSE_FAILED', {
+            error: closeError instanceof Error ? closeError.message : String(closeError),
+          });
+        });
+        this.repository.patchTrade(id, { state: 'SYNC_REQUIRED', closeReason: 'ERROR' });
+        throw new Error(`CRYPTO_PROTECTION_FAILED:${protectionErrors.join('|')}`);
+      }
 
       const openTime = Date.now();
       this.repository.patchTrade(id, {
@@ -163,16 +209,50 @@ export class CryptoExecutionService {
 
       return opened;
     } catch (error) {
-      this.repository.patchTrade(id, {
-        state: 'REJECTED',
-        closeReason: 'ERROR',
-        closeTime: Date.now(),
-      });
+      const current = this.database.getActiveTrades('BINANCE').find((trade) => trade.id === id);
+      if (!entryPlaced) {
+        this.repository.patchTrade(id, {
+          state: 'REJECTED',
+          closeReason: 'ERROR',
+          closeTime: Date.now(),
+        });
+      } else if (current?.state !== 'SYNC_REQUIRED') {
+        // An entry did reach the exchange. Never call it REJECTED because that could
+        // hide a live position. Force reconciliation until the exchange proves it closed.
+        this.repository.patchTrade(id, { state: 'SYNC_REQUIRED', closeReason: 'ERROR' });
+      }
       this.database.addTradeEvent(id, 'TRADE_OPEN_FAILED', {
+        entryPlaced,
         error: error instanceof Error ? error.message : String(error),
       });
       throw error;
     }
+  }
+
+  private async assertOneWayMode(): Promise<void> {
+    const mode = await this.binance.signedRequest<{ dualSidePosition: boolean }>('/fapi/v1/positionSide/dual', 'GET');
+    if (Boolean(mode.dualSidePosition)) {
+      throw new Error('BINANCE_HEDGE_MODE_NOT_SUPPORTED_V34_USE_ONE_WAY_MODE');
+    }
+  }
+
+  private async emergencyCloseSymbol(symbol: string): Promise<void> {
+    if (this.getSettings().appMode === 'PAPER') return;
+    const positions = await this.binance.getPositions();
+    const position = positions.find((item) => item.symbol.toUpperCase() === symbol.toUpperCase());
+    if (!position) return;
+
+    const quantity = Math.abs(position.positionAmt);
+    if (quantity <= 0) return;
+    const closeSide: TradeSide = position.positionAmt > 0 ? 'SELL' : 'BUY';
+    await this.binance.signedRequest('/fapi/v1/order', 'POST', {
+      symbol: symbol.toUpperCase(),
+      side: closeSide,
+      type: 'MARKET',
+      quantity,
+      reduceOnly: true,
+      newOrderRespType: 'RESULT',
+    });
   }
 
   private async paperBalance(): Promise<number> {
