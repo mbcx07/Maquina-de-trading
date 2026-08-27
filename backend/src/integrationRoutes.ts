@@ -10,7 +10,7 @@ export type WorkspaceResolver = (req: Request) => string;
 export function createIntegrationRouter(
   vault: IntegrationVault,
   getSettings: () => EngineSettings,
-  resolveWorkspaceId: WorkspaceResolver,
+  resolveWorkspaceId: WorkspaceResolver = () => normalizeWorkspaceId(undefined),
 ): Router {
   const router = Router();
   const workspaceFor = (req: Request) => normalizeWorkspaceId(resolveWorkspaceId(req));
