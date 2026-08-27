@@ -62,6 +62,32 @@ def serialize_rates(rows):
     ]
 
 
+@router.get("/snapshot/{symbol}")
+def snapshot(symbol: str, x_bridge_token: Optional[str] = Header(default=None)):
+    authorize(x_bridge_token)
+    ensure_mt5()
+    normalized = ensure_symbol(symbol)
+    info = mt5.symbol_info(normalized)
+    tick = mt5.symbol_info_tick(normalized)
+    if info is None or tick is None:
+        raise HTTPException(status_code=503, detail={"error": "MT5_SNAPSHOT_FAILED", "last_error": mt5.last_error()})
+
+    point = float(info.point or 0.0)
+    bid = float(tick.bid or 0.0)
+    ask = float(tick.ask or 0.0)
+    spread_points = (ask - bid) / point if point > 0 and ask > 0 and bid > 0 else float(info.spread or 0)
+    return {
+        "symbol": normalized,
+        "bid": bid,
+        "ask": ask,
+        "point": point,
+        "digits": int(info.digits),
+        "spreadPoints": float(spread_points),
+        "spreadPrice": max(0.0, ask - bid),
+        "timeMsc": int(getattr(tick, "time_msc", 0)),
+    }
+
+
 @router.get("/rates/{symbol}")
 def rates(
     symbol: str,
