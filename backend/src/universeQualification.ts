@@ -4,7 +4,7 @@ import { auditV335Symbol, defaultAuditRules, type SymbolAuditResult } from './un
 
 const DAY = 24 * 60 * 60_000;
 const ERROR_BACKOFF_MS = 15 * 60_000;
-const AUDIT_MODEL = 'V33.5_STRUCTURAL_PRICE_LEVELS';
+const AUDIT_MODEL = 'V33.5_STRUCTURAL_H45';
 
 export interface UniverseAuditState {
   status: 'IDLE' | 'RUNNING' | 'COMPLETED' | 'ERROR';
@@ -89,7 +89,6 @@ export class UniverseQualificationService {
         qualifiedSymbols: [], results: [], errors: [], rules: { ...rules, days },
       });
 
-      // Serialized historical retrieval protects Binance request-weight headroom.
       for (let i = 0; i < symbols.length; i++) {
         const symbol = symbols[i];
         try {
