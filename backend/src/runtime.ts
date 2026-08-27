@@ -9,6 +9,8 @@ import { CryptoMarketScanner } from './cryptoScanner.js';
 import { TradingDatabase } from './database.js';
 import { ForexExecutionService } from './forexExecution.js';
 import { ForexMarketScanner } from './forexScanner.js';
+import { createIntegrationRouter } from './integrationRoutes.js';
+import { IntegrationVault, normalizeWorkspaceId } from './integrationVault.js';
 import { calculateMetrics, metricsByStrategy, metricsBySymbol } from './metrics.js';
 import { Mt5BridgeClient } from './mt5.js';
 import { OpportunityOrchestrator } from './orchestrator.js';
@@ -34,9 +36,11 @@ const getSettings = (): EngineSettings => ({
   ...(database.getSettings() ?? {}),
 });
 
+const workspaceId = normalizeWorkspaceId(env.DEFAULT_WORKSPACE_ID);
+const vault = new IntegrationVault(database);
 const repository = new TradingRepository(database);
-const telegram = new TelegramService();
-const binance = new BinanceUsdmClient(getSettings);
+const telegram = new TelegramService(() => vault.getTelegram(workspaceId));
+const binance = new BinanceUsdmClient(getSettings, () => vault.getBinance(workspaceId));
 const binanceMarket = new BinanceMarketDataClient(getSettings);
 const mt5 = new Mt5BridgeClient(getSettings);
 const cryptoExecution = new CryptoExecutionService(database, repository, binance, telegram, getSettings);
@@ -46,6 +50,8 @@ const reconciler = new PositionReconciler(database, repository, binance, mt5, te
 const riskGuard = new PortfolioRiskGuard(database, telegram, getSettings);
 const cryptoScanner = new CryptoMarketScanner(database, binanceMarket, orchestrator, getSettings);
 const forexScanner = new ForexMarketScanner(database, mt5, orchestrator, getSettings);
+
+app.use('/api/integrations', createIntegrationRouter(vault, getSettings));
 
 const opportunitySchema = z.object({
   id: z.string().min(1), signalId: z.string().min(1), signalFingerprint: z.string().min(1),
@@ -84,7 +90,7 @@ const settingsPatchSchema = z.object({
 });
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'Maquina Trading V34 Runtime', mode: getSettings().appMode });
+  res.json({ ok: true, service: 'Maquina Trading V34 Runtime', mode: getSettings().appMode, workspaceId });
 });
 
 app.get('/api/state', async (_req, res) => {
@@ -93,24 +99,42 @@ app.get('/api/state', async (_req, res) => {
     const trades = database.getRecentTrades(1000);
     const activeCrypto = database.getActiveTrades('BINANCE');
     const activeForex = database.getActiveTrades('MT5');
+    const integrationStatuses = vault.getStatus(workspaceId);
+    const binanceIntegration = integrationStatuses.find((item) => item.provider === 'BINANCE');
+    const telegramIntegration = integrationStatuses.find((item) => item.provider === 'TELEGRAM');
+
     const brokerStatus: Record<string, unknown> = {
-      telegram: { configured: telegram.isConfigured() },
-      binance: { configured: Boolean(env.BINANCE_API_KEY && env.BINANCE_API_SECRET) },
+      telegram: {
+        configured: telegram.isConfigured(),
+        connected: telegramIntegration?.lastTestOk === true,
+        masked: telegramIntegration?.maskedPrimary,
+      },
+      binance: {
+        configured: binance.hasCredentials(),
+        connected: binanceIntegration?.lastTestOk === true,
+        masked: binanceIntegration?.maskedPrimary,
+      },
       mt5: { configured: Boolean(env.MT5_BRIDGE_URL) },
     };
 
     if (settings.appMode !== 'PAPER') {
-      const [binanceStatus, mt5Status] = await Promise.allSettled([binance.getPositions(), mt5.health()]);
+      const checks: PromiseSettledResult<unknown>[] = await Promise.allSettled([
+        binance.hasCredentials() ? binance.getPositions() : Promise.reject(new Error('BINANCE_NOT_CONFIGURED')),
+        mt5.health(),
+      ]);
+      const [binanceStatus, mt5Status] = checks;
       brokerStatus.binance = binanceStatus.status === 'fulfilled'
-        ? { configured: true, connected: true, openPositions: binanceStatus.value.length }
-        : { configured: true, connected: false, error: String(binanceStatus.reason) };
+        ? { configured: true, connected: true, openPositions: (binanceStatus.value as any[]).length, masked: binanceIntegration?.maskedPrimary }
+        : { configured: binance.hasCredentials(), connected: false, error: String(binanceStatus.reason), masked: binanceIntegration?.maskedPrimary };
       brokerStatus.mt5 = mt5Status.status === 'fulfilled'
-        ? { configured: true, connected: true, account: mt5Status.value.account }
+        ? { configured: true, connected: true, account: (mt5Status.value as any).account }
         : { configured: true, connected: false, error: String(mt5Status.reason) };
     }
 
     res.json({
+      workspaceId,
       settings,
+      integrations: integrationStatuses,
       brokerStatus,
       riskGuard: riskGuard.load(),
       scanners: { crypto: loadEngineState('cryptoScanner'), forex: loadEngineState('forexScanner') },
@@ -153,6 +177,9 @@ app.post('/api/engine/start', async (_req, res) => {
   try {
     const status = await riskGuard.evaluate();
     if (status.status === 'TRIPPED') return res.status(409).json({ error: 'RISK_KILL_SWITCH_TRIPPED', riskGuard: status });
+    if (getSettings().appMode !== 'PAPER' && !binance.hasCredentials()) {
+      return res.status(409).json({ error: 'BINANCE_CREDENTIALS_REQUIRED_FOR_LIVE_MODE' });
+    }
     database.saveSettings({ ...getSettings(), engineEnabled: true });
     res.json({ ok: true, engineEnabled: true });
   } catch (error) {
@@ -259,7 +286,7 @@ monitoringTimer.unref();
 
 app.listen(env.PORT, () => {
   console.log(`[V34] backend listening on http://127.0.0.1:${env.PORT}`);
-  console.log(`[V34] mode=${getSettings().appMode} engine=${getSettings().engineEnabled ? 'ON' : 'OFF'}`);
+  console.log(`[V34] workspace=${workspaceId} mode=${getSettings().appMode} engine=${getSettings().engineEnabled ? 'ON' : 'OFF'}`);
   void reconciler.runOnce().then(() => riskGuard.evaluate()).catch((error) => console.error('[V34] initial monitor error:', errorMessage(error)));
   cryptoScanner.start();
   forexScanner.start();
