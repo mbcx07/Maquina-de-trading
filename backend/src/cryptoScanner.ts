@@ -23,7 +23,9 @@ export class CryptoMarketScanner {
 
   start(): void {
     this.stopped = false;
-    if (this.qualification.shouldRefresh(7)) this.qualification.runInBackground(14);
+    if (this.getSettings().cryptoEnabled && this.qualification.shouldRefresh(7)) {
+      this.qualification.runInBackground(14);
+    }
     void this.loop();
   }
 
@@ -35,7 +37,10 @@ export class CryptoMarketScanner {
 
   async runCycle(): Promise<void> {
     if (this.running) return;
-    if (!this.getSettings().cryptoEnabled) return;
+    if (!this.getSettings().cryptoEnabled) {
+      this.saveState({ status: 'DISABLED', strategy: 'V33.5_ORIGINAL_COMPAT', completedAt: Date.now() });
+      return;
+    }
 
     if (this.qualification.shouldRefresh(7)) this.qualification.runInBackground(14);
     const audit = this.qualification.getState();
