@@ -3,7 +3,7 @@ set -euo pipefail
 
 BRANCH="feature/v34-dual-market-engine"
 COMPOSE="docker-compose.linux.yml"
-EXPECTED_RELEASE="2026.08.27-R9"
+EXPECTED_RELEASE="2026.08.27-R10"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
@@ -60,4 +60,4 @@ fi
 
 echo
 printf 'OK. Release verificada: %s\n' "$EXPECTED_RELEASE"
-echo "En el navegador debes ver: Quantum Dual V34 R9 y la etiqueta BUILD R9 · M5/M15 · AUTO."
+echo "En el navegador debes ver: BUILD R10 · HIGH-WR · M5/M15."
