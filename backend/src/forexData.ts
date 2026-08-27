@@ -87,14 +87,19 @@ export class ForexDataClient {
 
   async dualRates(symbol: string): Promise<DualRatesResult> {
     const dataSymbol = await this.resolveDataSymbol(symbol);
-    await this.waitForCreditCapacity(2);
+    await this.waitForCreditCapacity(1);
 
-    // Match the original v33.5 decision windows exactly so EMA state, trend and
-    // structural levels are calculated from the same amount of history.
-    const [ltf, htf] = await Promise.all([
-      this.getRatesResolved(dataSymbol, '1min', 100),
-      this.getRatesResolved(dataSymbol, '15min', 210),
-    ]);
+    // One sufficiently deep M1 series contains everything needed to reconstruct the
+    // exact 15-minute OHLC bars locally. This halves REST credit consumption versus
+    // requesting M1 and M15 separately and lets the automatic scanner run more often.
+    const rawM1 = await this.getRatesResolved(dataSymbol, '1min', 3500);
+    const aggregatedM15 = aggregateCandles(rawM1, 15);
+    const ltf = rawM1.slice(-180);
+    const htf = aggregatedM15.slice(-230);
+
+    if (ltf.length < 100 || htf.length < 210) {
+      throw new Error(`TWELVE_DATA_INSUFFICIENT_AGGREGATED_HISTORY:${symbol}:${dataSymbol}:m1=${ltf.length}:m15=${htf.length}`);
+    }
     return { ltf, htf, dataSymbol };
   }
 
@@ -109,7 +114,6 @@ export class ForexDataClient {
     const cached = this.resolvedSymbols.get(clean);
     if (cached) return cached;
 
-    // Physical FX and spot metals use slash notation in Twelve Data.
     if (/^[A-Z]{3}\/[A-Z]{3}$/.test(clean)) {
       this.resolvedSymbols.set(clean, clean);
       return clean;
@@ -120,8 +124,6 @@ export class ForexDataClient {
       return slash;
     }
 
-    // Common broker aliases (NAS100, US500, US30...) are not guaranteed to be the
-    // provider ticker. Resolve them through Twelve Data reference search once and cache.
     const searchTerm = SYMBOL_ALIASES[clean];
     if (searchTerm) {
       const resolved = await this.searchProviderSymbol(searchTerm, clean);
@@ -129,7 +131,6 @@ export class ForexDataClient {
       return resolved;
     }
 
-    // Allow explicit provider tickers such as QQQ/NDX without pretending they are FX pairs.
     if (/^[A-Z0-9.^:_-]{1,24}$/.test(clean)) {
       this.resolvedSymbols.set(clean, clean);
       return clean;
@@ -142,8 +143,6 @@ export class ForexDataClient {
     const left = this.usage.creditsLeft;
     if (left == null || !Number.isFinite(left) || left >= required) return;
 
-    // Basic plan has a minute quota. Respect the server-reported credits instead of
-    // hammering the endpoint into repeated 429 DATA_ERROR cycles.
     const now = new Date();
     const msToNextMinute = (60 - now.getUTCSeconds()) * 1000 - now.getUTCMilliseconds() + 1200;
     await sleep(Math.max(1200, Math.min(61_500, msToNextMinute)));
@@ -208,8 +207,6 @@ export class ForexDataClient {
         high: Number(row.high),
         low: Number(row.low),
         close: Number(row.close),
-        // Spot-FX responses may not contain meaningful volume. Use a neutral constant
-        // so the strategy cannot falsely award a volume-spike confirmation from 0 >= 0.
         volume: row.volume == null ? 1 : Math.max(1, Number(row.volume) || 1),
       }))
       .filter((row) =>
@@ -257,6 +254,24 @@ export function toTwelveDataSymbol(symbol: string): string {
   if (/^[A-Z]{6}$/.test(clean)) return `${clean.slice(0, 3)}/${clean.slice(3)}`;
   if (/^[A-Z0-9.^:_-]{1,24}$/.test(clean)) return clean;
   throw new Error(`TWELVE_DATA_SYMBOL_FORMAT_INVALID:${symbol}`);
+}
+
+function aggregateCandles(candles: Candle[], minutes: number): Candle[] {
+  const bucketMs = Math.max(1, minutes) * 60_000;
+  const buckets = new Map<number, Candle>();
+  for (const candle of candles) {
+    const time = Math.floor(candle.time / bucketMs) * bucketMs;
+    const current = buckets.get(time);
+    if (!current) {
+      buckets.set(time, { ...candle, time });
+      continue;
+    }
+    current.high = Math.max(current.high, candle.high);
+    current.low = Math.min(current.low, candle.low);
+    current.close = candle.close;
+    current.volume += candle.volume;
+  }
+  return [...buckets.values()].sort((a, b) => a.time - b.time);
 }
 
 function normalizeInputSymbol(symbol: string): string {
