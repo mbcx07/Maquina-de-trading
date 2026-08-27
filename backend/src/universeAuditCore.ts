@@ -2,6 +2,8 @@ import { analyzeStructureStrategyV335, runRollingBacktestV335 } from './analysis
 import type { Candle } from './analysis.js';
 import type { TradeSide } from './types.js';
 
+const ENTRY_TIMEFRAME_MINUTES = 5;
+
 export interface AuditTrade {
   entryTime: number;
   exitTime: number;
@@ -51,16 +53,15 @@ export interface AuditRules {
   minTrades: number;
   minProfitFactor: number;
   minOosTrades: number;
-  exitModel: 'V33.5_STRUCTURAL_H45';
+  exitModel: 'V33.5_M5_M15_H45';
 }
 
 export const defaultAuditRules = (startTime: number, endTime: number): AuditRules => ({
   startTime,
   endTime,
-  // The original rolling evaluator advances densely and only watches a setup for
-  // roughly 45 M1 candles. The previous universe audit scanned every 5 minutes and
-  // could keep a symbol busy for days until TP/SL, suppressing most valid trades.
-  scanStepMinutes: 2,
+  // The strategy now evaluates one closed M5 bar at a time and confirms trend on M15.
+  scanStepMinutes: 5,
+  // Preserve the short 45-minute evaluation horizon as 9 M5 bars, not 45 M5 bars.
   maxHoldMinutes: 45,
   roundTripCostPct: 0.12,
   minRollingWinRate: 75,
@@ -68,17 +69,17 @@ export const defaultAuditRules = (startTime: number, endTime: number): AuditRule
   minTrades: 5,
   minProfitFactor: 1.10,
   minOosTrades: 2,
-  exitModel: 'V33.5_STRUCTURAL_H45',
+  exitModel: 'V33.5_M5_M15_H45',
 });
 
 export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], rules: AuditRules): SymbolAuditResult {
   const l = [...ltf].sort((a, b) => a.time - b.time);
   const h = [...htf].sort((a, b) => a.time - b.time);
   const trades: AuditTrade[] = [];
-  const step = Math.max(1, Math.round(rules.scanStepMinutes));
+  const stepBars = Math.max(1, Math.ceil(rules.scanStepMinutes / ENTRY_TIMEFRAME_MINUTES));
   let busyUntil = 0;
 
-  for (let i = 99; i < l.length - 1; i += step) {
+  for (let i = 99; i < l.length - 1; i += stepBars) {
     const current = l[i];
     if (current.time < rules.startTime || current.time > rules.endTime) continue;
     if (current.time < busyUntil) continue;
@@ -99,8 +100,6 @@ export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], ru
       : rolling.winRate >= rules.minRollingWinRate && signal.confidence >= rules.minSignalConfidence;
     if (!passes) continue;
 
-    // Leverage changes margin ROE/PnL sizing, never the underlying SL/TP trigger price.
-    // Resolve only inside the same short horizon used by the original rolling test.
     const resolved = resolve(
       signal.side,
       signal.entry,
@@ -155,7 +154,8 @@ function resolve(
   entryIndex: number,
   maxHoldMinutes: number,
 ): { exit: number; exitTime: number; reason: 'TP' | 'SL' | 'END' } | null {
-  const lastIndex = Math.min(candles.length - 1, entryIndex + Math.max(1, Math.round(maxHoldMinutes)));
+  const maxHoldBars = Math.max(1, Math.ceil(maxHoldMinutes / ENTRY_TIMEFRAME_MINUTES));
+  const lastIndex = Math.min(candles.length - 1, entryIndex + maxHoldBars);
   for (let i = entryIndex + 1; i <= lastIndex; i++) {
     const candle = candles[i];
     if (side === 'BUY') {
