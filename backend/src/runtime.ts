@@ -7,6 +7,7 @@ import { defaultSettings, env } from './config.js';
 import { CryptoExecutionService } from './cryptoExecution.js';
 import { CryptoMarketScanner } from './cryptoScanner.js';
 import { TradingDatabase } from './database.js';
+import { EmergencyStopService } from './emergencyStop.js';
 import { ForexExecutionService } from './forexExecution.js';
 import { ForexMarketScanner } from './forexScanner.js';
 import { HistoricalBacktestService } from './historicalBacktest.js';
@@ -49,6 +50,7 @@ const forexExecution = new ForexExecutionService(database, repository, mt5, tele
 const orchestrator = new OpportunityOrchestrator(database, repository, cryptoExecution, forexExecution, getSettings);
 const reconciler = new PositionReconciler(database, repository, binance, mt5, telegram, getSettings);
 const riskGuard = new PortfolioRiskGuard(database, telegram, getSettings);
+const emergencyStop = new EmergencyStopService(database, repository, binance, mt5, telegram, getSettings);
 const cryptoScanner = new CryptoMarketScanner(database, binanceMarket, orchestrator, getSettings);
 const forexScanner = new ForexMarketScanner(database, mt5, orchestrator, getSettings);
 const historicalBacktest = new HistoricalBacktestService(database, binanceMarket, mt5, getSettings);
@@ -71,6 +73,7 @@ const settingsPatchSchema = z.object({
   riskKillSwitchEnabled: z.boolean().optional(),
   dailyLossLimitPct: z.number().positive().max(100).optional(),
   maxDrawdownPct: z.number().positive().max(100).optional(),
+  emergencyStopMode: z.enum(['PAUSE_ONLY', 'CLOSE_TRACKED']).optional(),
   cryptoEnabled: z.boolean().optional(),
   maxConcurrentCryptoTrades: z.number().int().min(1).max(10).optional(),
   cryptoMarginPctPerTrade: z.number().positive().max(100).optional(),
@@ -89,6 +92,7 @@ const settingsPatchSchema = z.object({
   forexMinRollingWinRate: z.number().min(0).max(100).optional(),
   forexMagicNumber: z.number().int().positive().optional(),
   forexMaxDeviationPoints: z.number().int().min(0).max(1000).optional(),
+  forexMaxSpreadPoints: z.number().min(0).max(100000).optional(),
 });
 
 const backtestSchema = z.object({
@@ -169,6 +173,7 @@ app.get('/api/state', async (_req, res) => {
       integrations: integrationStatuses,
       brokerStatus,
       riskGuard: riskGuard.load(),
+      emergencyStop: loadEngineState('emergencyStop'),
       scanners: { crypto: loadEngineState('cryptoScanner'), forex: loadEngineState('forexScanner') },
       active: {
         crypto: activeCrypto,
@@ -230,6 +235,11 @@ app.post('/api/engine/start', async (_req, res) => {
     }
 
     database.saveSettings({ ...settings, engineEnabled: true });
+    database.db.prepare(`
+      INSERT INTO engine_state(key, value, updated_at)
+      VALUES('emergencyStop', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+    `).run(JSON.stringify({ active: false, clearedAt: Date.now() }), Date.now());
     res.json({ ok: true, engineEnabled: true });
   } catch (error) {
     res.status(500).json({ error: errorMessage(error) });
@@ -242,14 +252,13 @@ app.post('/api/engine/pause', (_req, res) => {
   res.json({ ok: true, engineEnabled: false });
 });
 
-app.post('/api/emergency-stop', (_req, res) => {
-  database.saveSettings({ ...getSettings(), engineEnabled: false });
-  database.db.prepare(`
-    INSERT INTO engine_state(key, value, updated_at) VALUES('emergencyStop', 'true', ?)
-    ON CONFLICT(key) DO UPDATE SET value='true', updated_at=excluded.updated_at
-  `).run(Date.now());
-  void telegram.alert('EMERGENCY STOP', 'Nuevas entradas bloqueadas inmediatamente. Las posiciones existentes conservan SL/TP.').catch(() => undefined);
-  res.json({ ok: true, engineEnabled: false, emergencyStop: true });
+app.post('/api/emergency-stop', async (_req, res) => {
+  try {
+    const result = await emergencyStop.trigger();
+    res.json({ ok: result.failed === 0, ...result });
+  } catch (error) {
+    res.status(500).json({ error: errorMessage(error) });
+  }
 });
 
 app.post('/api/reconcile', async (_req, res) => {
