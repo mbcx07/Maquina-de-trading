@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import { analyzeStructureStrategy, opportunityScore, runRollingBacktest } from './analysis.js';
 import { TradingDatabase } from './database.js';
-import { Mt5BridgeClient } from './mt5.js';
-import { OpportunityOrchestrator } from './orchestrator.js';
+import { ForexDataClient } from './forexData.js';
+import { TradingRepository } from './repositories.js';
+import { TelegramService } from './telegram.js';
 import type { EngineSettings, Opportunity } from './types.js';
 
 export class ForexMarketScanner {
@@ -10,12 +11,13 @@ export class ForexMarketScanner {
   private stopped = false;
   private timer: NodeJS.Timeout | null = null;
   private signalZoneActive = new Map<string, boolean>();
-  private initializedSymbols = new Set<string>();
+  private retestCount = new Map<string, number>();
 
   constructor(
     private readonly database: TradingDatabase,
-    private readonly mt5: Mt5BridgeClient,
-    private readonly orchestrator: OpportunityOrchestrator,
+    private readonly market: ForexDataClient,
+    private readonly repository: TradingRepository,
+    private readonly telegram: TelegramService,
     private readonly getSettings: () => EngineSettings,
   ) {}
 
@@ -33,22 +35,32 @@ export class ForexMarketScanner {
   async runCycle(): Promise<void> {
     if (this.running) return;
     const settings = this.getSettings();
-    if (!settings.forexEnabled) return;
+    if (!settings.forexEnabled) {
+      this.saveState({ status: 'DISABLED', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
+      return;
+    }
+    if (!this.market.hasCredentials()) {
+      this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
+      return;
+    }
 
     this.running = true;
-    const symbols = [...new Set(settings.forexSymbols.map((symbol) => symbol.trim()).filter(Boolean))];
-    const opportunities: Opportunity[] = [];
+    const symbols = [...new Set(settings.forexSymbols.map((symbol) => normalizeDisplaySymbol(symbol)).filter(Boolean))];
+    const freshSignals: Opportunity[] = [];
     let errors = 0;
     const startedAt = Date.now();
 
     try {
-      this.saveState({ status: 'SCANNING', startedAt, total: symbols.length, scanned: 0, opportunities: 0, errors: 0 });
+      this.saveState({
+        status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+        startedAt, total: symbols.length, scanned: 0, signals: 0, errors: 0,
+      });
 
       for (let index = 0; index < symbols.length; index++) {
         const symbol = symbols[index];
         try {
-          const opportunity = await this.scanSymbol(symbol);
-          if (opportunity) opportunities.push(opportunity);
+          const signal = await this.scanSymbol(symbol);
+          if (signal) freshSignals.push(signal);
         } catch (error) {
           errors++;
           this.database.db.prepare(`
@@ -63,27 +75,44 @@ export class ForexMarketScanner {
         }
 
         this.saveState({
-          status: 'SCANNING',
-          startedAt,
-          total: symbols.length,
-          scanned: index + 1,
-          current: symbol,
-          opportunities: opportunities.length,
-          errors,
+          status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+          startedAt, total: symbols.length, scanned: index + 1, current: symbol,
+          signals: freshSignals.length, errors, usage: this.market.getUsage(),
         });
       }
 
-      const result = await this.orchestrator.process(opportunities, true);
+      const qualified = freshSignals
+        .filter((signal) =>
+          signal.confidence >= settings.forexMinSignalConfidence &&
+          signal.rollingWinRate >= settings.forexMinRollingWinRate,
+        )
+        .sort((a, b) => b.score - a.score)
+        .slice(0, settings.forexSignalsPerCycle);
+
+      let sent = 0;
+      for (const signal of qualified) {
+        this.repository.saveSignal(signal);
+        // Signal-only opportunities are intentionally never auto-executed.
+        this.repository.rejectOpportunity(signal.id, 'FOREX_SIGNAL_ONLY_MANUAL_EXECUTION');
+        if (this.wasSent(signal.signalFingerprint)) continue;
+
+        const retest = (this.retestCount.get(signal.symbol) ?? 0) + 1;
+        this.retestCount.set(signal.symbol, retest);
+        try {
+          await this.telegram.forexSignal(signal, retest);
+          this.recordTelegramSignal(signal, 'SENT');
+          sent++;
+        } catch (error) {
+          this.recordTelegramSignal(signal, 'ERROR', error instanceof Error ? error.message : String(error));
+        }
+      }
+
       this.saveState({
-        status: 'IDLE',
-        startedAt,
-        completedAt: Date.now(),
-        total: symbols.length,
-        scanned: symbols.length,
-        opportunities: opportunities.length,
-        selected: result.selected.forex.length,
-        executed: result.executionResults.filter((item) => item.broker === 'MT5' && item.ok === true).length,
-        errors,
+        status: 'IDLE', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+        startedAt, completedAt: Date.now(), total: symbols.length, scanned: symbols.length,
+        signals: freshSignals.length, qualified: qualified.length, sent, errors,
+        usage: this.market.getUsage(),
+        nextScanMinutes: settings.forexSignalScanIntervalMinutes,
       });
     } finally {
       this.running = false;
@@ -95,41 +124,32 @@ export class ForexMarketScanner {
     try {
       await this.runCycle();
     } catch (error) {
-      this.saveState({ status: 'ERROR', error: error instanceof Error ? error.message : String(error), at: Date.now() });
-      console.error('[V34] forex scanner:', error instanceof Error ? error.message : error);
+      this.saveState({
+        status: 'ERROR', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+        error: error instanceof Error ? error.message : String(error), at: Date.now(),
+      });
+      console.error('[V34] forex signal scanner:', error instanceof Error ? error.message : error);
     }
 
     if (!this.stopped) {
-      this.timer = setTimeout(() => void this.loop(), 10_000);
+      const delay = Math.max(1, this.getSettings().forexSignalScanIntervalMinutes) * 60_000;
+      this.timer = setTimeout(() => void this.loop(), delay);
       this.timer.unref();
     }
   }
 
   private async scanSymbol(symbol: string): Promise<Opportunity | null> {
-    const { ltf, htf } = await this.mt5.dualRates(symbol);
+    const { ltf, htf } = await this.market.dualRates(symbol);
     if (ltf.length < 80 || htf.length < 200) return null;
 
     const signal = analyzeStructureStrategy(ltf, htf, symbol);
-    const activeForSymbol = this.database.getActiveTrades('MT5')
-      .filter((trade) => trade.symbol.toUpperCase() === symbol.toUpperCase());
-
-    // On backend restart, if the pair already has an open ticket and is still in the
-    // same valid setup zone, do not treat the restart itself as a new retest.
-    if (!this.initializedSymbols.has(symbol)) {
-      this.initializedSymbols.add(symbol);
-      if (activeForSymbol.length > 0 && signal) {
-        this.signalZoneActive.set(symbol, true);
-        return null;
-      }
-    }
-
     if (!signal) {
       this.signalZoneActive.set(symbol, false);
       return null;
     }
 
-    // A Forex reentry is emitted only on a new transition into a valid setup zone.
-    // Consecutive candles in the same setup do not create repeated tickets.
+    // A new Telegram signal is generated only when the pair leaves a valid setup
+    // and later enters a valid setup again. This is the manual-Forex retest rule.
     if (this.signalZoneActive.get(symbol) === true) return null;
     this.signalZoneActive.set(symbol, true);
 
@@ -138,7 +158,7 @@ export class ForexMarketScanner {
     const score = opportunityScore(signal, backtest, 60);
     const candleTime = ltf.at(-1)?.time ?? Date.now();
     const fingerprint = sha256([
-      'MT5', symbol, signal.side, signal.strategy, String(candleTime),
+      'FOREX-SIGNAL', symbol, signal.side, signal.strategy, String(candleTime),
       roundKey(signal.stopLoss), roundKey(signal.takeProfit),
     ].join('|'));
 
@@ -146,10 +166,11 @@ export class ForexMarketScanner {
       id: `OP-FX-${fingerprint.slice(0, 24)}`,
       signalId: `SIG-FX-${fingerprint.slice(0, 24)}`,
       signalFingerprint: fingerprint,
+      // Legacy DB schema names Forex as MT5. metadata.executionMode is authoritative.
       broker: 'MT5',
       symbol,
       side: signal.side,
-      timeframe: 'M1/M15',
+      timeframe: '1m/15m',
       strategy: signal.strategy,
       confidence: signal.confidence,
       rollingWinRate,
@@ -162,15 +183,36 @@ export class ForexMarketScanner {
       tp3: signal.tp3,
       createdAt: Date.now(),
       metadata: {
+        executionMode: 'SIGNAL_ONLY',
+        dataProvider: 'TWELVE_DATA',
         reason: signal.reason,
         atr: signal.atr,
         backtest,
-        reentry: activeForSymbol.length > 0,
-        existingTickets: activeForSymbol.map((trade) => trade.brokerOrderId).filter(Boolean),
         rollingWinRateSource: backtest.tradesEvaluated >= 3 ? 'ROLLING_BACKTEST' : 'SIGNAL_CONFIDENCE_FALLBACK',
         candleTime,
       },
     };
+  }
+
+  private wasSent(fingerprint: string): boolean {
+    const row = this.database.db.prepare(`
+      SELECT 1 FROM telegram_events
+      WHERE event_type = 'FOREX_SIGNAL' AND status = 'SENT' AND payload LIKE ?
+      LIMIT 1
+    `).get(`%${fingerprint}%`);
+    return Boolean(row);
+  }
+
+  private recordTelegramSignal(signal: Opportunity, status: 'SENT' | 'ERROR', error?: string): void {
+    this.database.db.prepare(`
+      INSERT INTO telegram_events(trade_id, event_type, status, payload, error, created_at)
+      VALUES(NULL, 'FOREX_SIGNAL', ?, ?, ?, ?)
+    `).run(
+      status,
+      JSON.stringify({ fingerprint: signal.signalFingerprint, signalId: signal.signalId, symbol: signal.symbol }),
+      error ?? null,
+      Date.now(),
+    );
   }
 
   private saveState(value: Record<string, unknown>): void {
@@ -180,6 +222,10 @@ export class ForexMarketScanner {
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
     `).run(JSON.stringify(value), Date.now());
   }
+}
+
+function normalizeDisplaySymbol(symbol: string): string {
+  return symbol.trim().toUpperCase().replace('/', '');
 }
 
 function sha256(value: string): string {
