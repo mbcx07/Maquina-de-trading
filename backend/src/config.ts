@@ -19,6 +19,7 @@ const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().default(''),
   TELEGRAM_CHAT_ID: z.string().default(''),
 
+  // Legacy MT5 variables remain only for old backtests/migration. Runtime Forex no longer requires them.
   MT5_BRIDGE_URL: z.string().url().default('http://127.0.0.1:8790'),
   MT5_BRIDGE_TOKEN: z.string().default(''),
 
@@ -28,12 +29,13 @@ const envSchema = z.object({
   CRYPTO_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
   CRYPTO_MIN_WINRATE: z.coerce.number().min(0).max(100).default(75),
 
-  FOREX_SYMBOLS: z.string().default('EURUSD,GBPUSD,USDJPY,USDCHF,USDCAD,AUDUSD,NZDUSD,EURJPY,GBPJPY,EURGBP,EURNZD,GBPNZD'),
-  FOREX_MAX_TRADES: z.coerce.number().int().min(1).max(200).default(20),
-  FOREX_MAX_ENTRIES_PER_SYMBOL: z.coerce.number().int().min(0).max(50).default(0),
+  // Four pairs × two time-series requests × 96 cycles/day (15 min) ≈ 768 credits/day,
+  // which fits the current Twelve Data Basic 800/day allowance.
+  FOREX_SYMBOLS: z.string().default('EURUSD,GBPUSD,USDJPY,EURJPY'),
+  FOREX_SIGNAL_SCAN_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
+  FOREX_SIGNALS_PER_CYCLE: z.coerce.number().int().min(1).max(20).default(4),
   FOREX_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
   FOREX_MIN_WINRATE: z.coerce.number().min(0).max(100).default(70),
-  FOREX_MAX_SPREAD_POINTS: z.coerce.number().min(0).max(100000).default(30),
 
   DAILY_LOSS_LIMIT_PCT: z.coerce.number().positive().max(100).default(5),
   MAX_DRAWDOWN_PCT: z.coerce.number().positive().max(100).default(15),
@@ -61,15 +63,20 @@ export function defaultSettings(): EngineSettings {
     cryptoMinRollingWinRate: env.CRYPTO_MIN_WINRATE,
 
     forexEnabled: true,
+    forexExecutionMode: 'SIGNAL_ONLY',
     forexSymbols: env.FOREX_SYMBOLS.split(',').map((symbol) => symbol.trim()).filter(Boolean),
-    maxConcurrentForexTrades: env.FOREX_MAX_TRADES,
-    forexMaxEntriesPerSymbol: env.FOREX_MAX_ENTRIES_PER_SYMBOL,
-    forexRiskMode: 'RISK_TO_SL',
-    forexPctPerTrade: 1,
+    forexSignalScanIntervalMinutes: env.FOREX_SIGNAL_SCAN_INTERVAL_MINUTES,
+    forexSignalsPerCycle: env.FOREX_SIGNALS_PER_CYCLE,
     forexMinSignalConfidence: env.FOREX_MIN_CONFIDENCE,
     forexMinRollingWinRate: env.FOREX_MIN_WINRATE,
+
+    // Legacy fields retained so existing SQLite settings remain loadable.
+    maxConcurrentForexTrades: 20,
+    forexMaxEntriesPerSymbol: 0,
+    forexRiskMode: 'RISK_TO_SL',
+    forexPctPerTrade: 1,
     forexMagicNumber: 340034,
     forexMaxDeviationPoints: 20,
-    forexMaxSpreadPoints: env.FOREX_MAX_SPREAD_POINTS,
+    forexMaxSpreadPoints: 0,
   };
 }
