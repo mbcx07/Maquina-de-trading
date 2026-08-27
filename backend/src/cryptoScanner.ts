@@ -39,12 +39,17 @@ export class CryptoMarketScanner {
     const opportunities: Opportunity[] = [];
 
     try {
-      const [symbols, tickers] = await Promise.all([
+      const [allSymbols, tickers] = await Promise.all([
         this.market.getTradableUsdtPerpetualSymbols(),
         this.market.getTicker24h(),
       ]);
 
       const tickerMap = new Map(tickers.map((ticker) => [ticker.symbol, ticker]));
+
+      // Original v33.5 universe rule: USDT perpetuals need >2M USDT quote volume / 24h.
+      const symbols = allSymbols
+        .filter((symbol) => (tickerMap.get(symbol)?.quoteVolume ?? 0) > 2_000_000)
+        .sort((a, b) => (tickerMap.get(b)?.quoteVolume ?? 0) - (tickerMap.get(a)?.quoteVolume ?? 0));
       const liquidity = liquidityPercentiles(symbols, tickerMap);
 
       this.saveState({
@@ -52,6 +57,8 @@ export class CryptoMarketScanner {
         strategy: 'V33.5_ORIGINAL_COMPAT',
         startedAt,
         total: symbols.length,
+        universeTotal: allSymbols.length,
+        minQuoteVolume24h: 2_000_000,
         scanned: 0,
         opportunities: 0,
         errors: 0,
@@ -76,6 +83,8 @@ export class CryptoMarketScanner {
           strategy: 'V33.5_ORIGINAL_COMPAT',
           startedAt,
           total: symbols.length,
+          universeTotal: allSymbols.length,
+          minQuoteVolume24h: 2_000_000,
           scanned,
           current: chunk.at(-1) ?? null,
           opportunities: opportunities.length,
@@ -92,6 +101,8 @@ export class CryptoMarketScanner {
         startedAt,
         completedAt: Date.now(),
         total: symbols.length,
+        universeTotal: allSymbols.length,
+        minQuoteVolume24h: 2_000_000,
         scanned,
         opportunities: opportunities.length,
         selected: result.selected.crypto.length,
@@ -139,10 +150,10 @@ export class CryptoMarketScanner {
     const settings = this.getSettings();
     const backtest = runRollingBacktestV335(symbol, ltf, htf);
 
-    // Restore the original v33.5 admission rule exactly in spirit:
-    // - no evaluated trades => only extreme signal confidence (>=80)
-    // - one or more evaluated trades => NEVER replace actual WR with theoretical confidence
-    // This removes the V34 fallback that could turn a 0%/50% short rolling result into 80-95%.
+    // Original v33.5 admission rule:
+    // no history => confidence >=80; with any history => actual rolling WR >= threshold.
+    // V34 previously replaced WR with signal confidence when there were only 1-2 trades;
+    // that fallback is intentionally removed here.
     const passesOriginalFilter = backtest.tradesEvaluated === 0
       ? signal.confidence >= Math.max(80, settings.cryptoMinSignalConfidence)
       : backtest.winRate >= settings.cryptoMinRollingWinRate &&
