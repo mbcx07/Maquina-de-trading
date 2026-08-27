@@ -59,8 +59,6 @@ export class PaperBrokerService {
   }
 
   async runOnce(): Promise<void> {
-    // PAPER is a separate simulated account. Freeze it whenever the operator changes
-    // to TESTNET/REAL so it can never consume prices from the wrong market environment.
     if (this.getSettings().appMode !== 'PAPER') {
       this.saveEngineState('paperBroker', { status: 'PAUSED_MODE', updatedAt: Date.now() });
       return;
@@ -104,14 +102,10 @@ export class PaperBrokerService {
   async closeTradeManually(tradeId: string): Promise<TradeRecord> {
     if (this.getSettings().appMode !== 'PAPER') throw new Error('SWITCH_TO_PAPER_TO_CLOSE_PAPER_TRADE');
     const trade = this.database.getRecentTrades(50_000).find((item) => item.id === tradeId);
-    if (!trade || trade.executionMode !== 'PAPER' || trade.broker !== 'BINANCE') {
-      throw new Error('PAPER_TRADE_NOT_FOUND');
-    }
+    if (!trade || trade.executionMode !== 'PAPER' || trade.broker !== 'BINANCE') throw new Error('PAPER_TRADE_NOT_FOUND');
     if (trade.state !== 'OPEN') throw new Error('PAPER_TRADE_NOT_OPEN');
 
-    const candles = await this.market.getMarkPriceKlines(trade.symbol, '1m', 1);
-    const mark = candles.at(-1)?.close;
-    if (!mark || mark <= 0) throw new Error('PAPER_MARK_PRICE_UNAVAILABLE');
+    const mark = await this.market.getMarkPrice(trade.symbol);
     await this.finalizeTrade(trade, mark, 'MANUAL', Date.now());
     this.recordSnapshotIfNeeded(true);
     const closed = this.database.getRecentTrades(50_000).find((item) => item.id === tradeId);
@@ -129,9 +123,7 @@ export class PaperBrokerService {
     const balance = initialBalance + metrics.netProfit;
     const equity = balance + metrics.unrealizedPnl;
     const curve = this.loadEquityCurve(400);
-    const maxDrawdownPct = calculateCurveDrawdown(
-      curve.length ? curve.map((point) => point.equity) : [initialBalance, equity],
-    );
+    const maxDrawdownPct = calculateCurveDrawdown(curve.length ? curve.map((point) => point.equity) : [initialBalance, equity]);
 
     return {
       initialBalance,
@@ -154,55 +146,49 @@ export class PaperBrokerService {
   private async updateTrade(trade: TradeRecord): Promise<void> {
     const now = Date.now();
     const openTime = trade.openTime ?? trade.createdAt;
-    const cursor = this.loadCursor(trade.id);
-    const gap = cursor == null ? Number.POSITIVE_INFINITY : now - cursor;
-    const candles = gap > 3 * 60_000
-      ? await this.market.getMarkPriceKlinesRange(
-          trade.symbol,
-          '1m',
-          Math.max(openTime - 60_000, (cursor ?? openTime) - 60_000),
-          now,
-        )
-      : await this.market.getMarkPriceKlines(trade.symbol, '1m', 3);
 
-    const relevant = candles
-      .filter((candle) => candle.time + 60_000 >= openTime)
-      .sort((a, b) => a.time - b.time);
-    if (!relevant.length) return;
-
-    for (const candle of relevant) {
-      const slTouched = trade.side === 'BUY'
-        ? candle.low <= trade.stopLoss
-        : candle.high >= trade.stopLoss;
-      const tpTouched = trade.side === 'BUY'
-        ? candle.high >= trade.takeProfit
-        : candle.low <= trade.takeProfit;
-
-      // Same-minute ambiguity is resolved conservatively as SL first. This matches
-      // the historical validator and prevents optimistic PAPER results.
-      if (slTouched) {
-        await this.finalizeTrade(trade, trade.stopLoss, 'SL', candle.time);
-        return;
-      }
-      if (tpTouched) {
-        await this.finalizeTrade(trade, trade.takeProfit, 'TP', candle.time);
-        return;
-      }
+    // Current mark is safe because it is observed after the trade exists.
+    const mark = await this.market.getMarkPrice(trade.symbol);
+    if (crossedStop(trade, mark)) {
+      await this.finalizeTrade(trade, trade.stopLoss, 'SL', now);
+      return;
+    }
+    if (crossedTakeProfit(trade, mark)) {
+      await this.finalizeTrade(trade, trade.takeProfit, 'TP', now);
+      return;
     }
 
-    const mark = relevant.at(-1)!.close;
+    // Never inspect the OHLC high/low of the entry minute: part of that candle happened
+    // before the simulated order existed and caused the old false "micro-closes".
+    const firstSafeCandle = Math.floor(openTime / 60_000) * 60_000 + 60_000;
+    const cursor = this.loadCursor(trade.id);
+    const start = Math.max(firstSafeCandle, cursor == null ? firstSafeCandle : cursor + 60_000);
+
+    if (start <= now) {
+      const candles = await this.market.getMarkPriceKlinesRange(trade.symbol, '1m', start, now);
+      const relevant = candles.filter((candle) => candle.time >= firstSafeCandle).sort((a, b) => a.time - b.time);
+
+      for (const candle of relevant) {
+        const slTouched = trade.side === 'BUY' ? candle.low <= trade.stopLoss : candle.high >= trade.stopLoss;
+        const tpTouched = trade.side === 'BUY' ? candle.high >= trade.takeProfit : candle.low <= trade.takeProfit;
+        if (slTouched) {
+          await this.finalizeTrade(trade, trade.stopLoss, 'SL', candle.time);
+          return;
+        }
+        if (tpTouched) {
+          await this.finalizeTrade(trade, trade.takeProfit, 'TP', candle.time);
+          return;
+        }
+      }
+      if (relevant.length) this.saveCursor(trade.id, relevant.at(-1)!.time);
+    }
+
     const unrealizedPnl = pricePnl(trade, mark);
     this.repository.patchTrade(trade.id, { unrealizedPnl });
-    this.saveCursor(trade.id, relevant.at(-1)!.time);
-    this.database.addTradeEvent(trade.id, 'PAPER_MARK', { mark, unrealizedPnl, candleTime: relevant.at(-1)!.time });
+    this.database.addTradeEvent(trade.id, 'PAPER_MARK', { mark, unrealizedPnl, observedAt: now });
   }
 
-  private async finalizeTrade(
-    trade: TradeRecord,
-    exitPrice: number,
-    closeReason: CloseReason,
-    closeTime: number,
-  ): Promise<void> {
+  private async finalizeTrade(trade: TradeRecord, exitPrice: number, closeReason: CloseReason, closeTime: number): Promise<void> {
     const grossPnl = pricePnl(trade, exitPrice);
     const notional = Math.max(0, Number(trade.notional ?? 0));
     const commission = notional * Math.max(0, this.getSettings().paperRoundTripCostPct) / 100;
@@ -238,16 +224,13 @@ export class PaperBrokerService {
   private recordSnapshotIfNeeded(force = false): void {
     const now = Date.now();
     if (!force && now - this.lastSnapshotAt < 30_000) return;
-
     const settings = this.getSettings();
     const paperTrades = this.database.getRecentTrades(50_000)
       .filter((trade) => trade.broker === 'BINANCE' && trade.executionMode === 'PAPER');
     const metrics = calculateMetrics(paperTrades, 'BINANCE');
     const balance = settings.paperInitialBalance + metrics.netProfit;
     const equity = balance + metrics.unrealizedPnl;
-    if (!force && this.lastSnapshotEquity != null && Math.abs(equity - this.lastSnapshotEquity) < 1e-9 && now - this.lastSnapshotAt < 60_000) {
-      return;
-    }
+    if (!force && this.lastSnapshotEquity != null && Math.abs(equity - this.lastSnapshotEquity) < 1e-9 && now - this.lastSnapshotAt < 60_000) return;
 
     this.database.db.prepare(`
       INSERT INTO paper_equity_snapshots(balance, equity, realized_pnl, unrealized_pnl, created_at)
@@ -260,13 +243,11 @@ export class PaperBrokerService {
   private loadEquityCurve(limit: number): PaperEquityPoint[] {
     const rows = this.database.db.prepare(`
       SELECT balance, equity, realized_pnl, unrealized_pnl, created_at
-      FROM paper_equity_snapshots
-      ORDER BY created_at ASC
+      FROM paper_equity_snapshots ORDER BY created_at ASC
     `).all() as Array<Record<string, unknown>>;
     if (!rows.length) return [];
     const step = Math.max(1, Math.ceil(rows.length / Math.max(2, limit)));
-    const sampled = rows.filter((_, index) => index % step === 0 || index === rows.length - 1);
-    return sampled.map((row) => ({
+    return rows.filter((_, index) => index % step === 0 || index === rows.length - 1).map((row) => ({
       time: Number(row.created_at),
       balance: Number(row.balance),
       equity: Number(row.equity),
@@ -276,9 +257,7 @@ export class PaperBrokerService {
   }
 
   private loadCursor(tradeId: string): number | null {
-    const row = this.database.db.prepare(`SELECT last_candle_time FROM paper_trade_cursor WHERE trade_id = ?`).get(tradeId) as
-      | { last_candle_time: number }
-      | undefined;
+    const row = this.database.db.prepare(`SELECT last_candle_time FROM paper_trade_cursor WHERE trade_id = ?`).get(tradeId) as { last_candle_time: number } | undefined;
     return row ? Number(row.last_candle_time) : null;
   }
 
@@ -292,8 +271,7 @@ export class PaperBrokerService {
 
   private saveEngineState(key: string, value: Record<string, unknown>): void {
     this.database.db.prepare(`
-      INSERT INTO engine_state(key, value, updated_at)
-      VALUES(?, ?, ?)
+      INSERT INTO engine_state(key, value, updated_at) VALUES(?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
     `).run(key, JSON.stringify(value), Date.now());
   }
@@ -303,16 +281,11 @@ export class PaperBrokerService {
     try {
       await this.runOnce();
     } catch (error) {
-      this.saveEngineState('paperBroker', {
-        status: 'ERROR',
-        error: error instanceof Error ? error.message : String(error),
-        updatedAt: Date.now(),
-      });
+      this.saveEngineState('paperBroker', { status: 'ERROR', error: error instanceof Error ? error.message : String(error), updatedAt: Date.now() });
       console.error('[V34] paper broker:', error instanceof Error ? error.message : error);
     }
-
     if (!this.stopped) {
-      this.timer = setTimeout(() => void this.loop(), 10_000);
+      this.timer = setTimeout(() => void this.loop(), 5_000);
       this.timer.unref();
     }
   }
@@ -325,7 +298,6 @@ export class PaperBrokerService {
         updated_at INTEGER NOT NULL,
         FOREIGN KEY(trade_id) REFERENCES trades(id) ON DELETE CASCADE
       );
-
       CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         balance REAL NOT NULL,
@@ -337,6 +309,14 @@ export class PaperBrokerService {
       CREATE INDEX IF NOT EXISTS idx_paper_equity_time ON paper_equity_snapshots(created_at ASC);
     `);
   }
+}
+
+function crossedStop(trade: TradeRecord, price: number): boolean {
+  return trade.side === 'BUY' ? price <= trade.stopLoss : price >= trade.stopLoss;
+}
+
+function crossedTakeProfit(trade: TradeRecord, price: number): boolean {
+  return trade.side === 'BUY' ? price >= trade.takeProfit : price <= trade.takeProfit;
 }
 
 function pricePnl(trade: TradeRecord, price: number): number {
