@@ -1,0 +1,58 @@
+name: V34 Check
+
+on:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run selftest
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm install
+      - run: npm run build
+
+  mt5-bridge-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m py_compile mt5-bridge/main.py mt5-bridge/app.py mt5-bridge/market_routes.py
+
+  secret-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure frontend Binance service has no embedded signing secret
+        run: |
+          if grep -E 'apiSecret\s*=|apiKey\s*=|BINANCE_API_SECRET\s*=.+[^=[:space:]]' services/binance.ts; then
+            echo 'Potential Binance secret found in frontend service'
+            exit 1
+          fi
