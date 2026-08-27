@@ -80,7 +80,10 @@ export class UniverseQualificationService {
         qualifiedSymbols: [], results: [], errors: [], rules: { ...rules, days },
       });
 
-      const chunkSize = 2;
+      // Historical M1 retrieval is deliberately serialized. A full-market audit is
+      // much heavier than the live scanner and must not consume Binance's entire
+      // IP request-weight budget used by execution/reconciliation on the same VPS.
+      const chunkSize = 1;
       for (let i = 0; i < symbols.length; i += chunkSize) {
         const chunk = symbols.slice(i, i + chunkSize);
         const settled = await Promise.allSettled(chunk.map(async (symbol) => {
