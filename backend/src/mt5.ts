@@ -1,4 +1,5 @@
 import { env } from './config.js';
+import type { Candle } from './analysis.js';
 import type { EngineSettings, TradeSide } from './types.js';
 
 export interface Mt5Account {
@@ -119,6 +120,20 @@ export class Mt5BridgeClient {
 
   history(positionTicket: number): Promise<Mt5PositionHistory> {
     return this.request(`/history/${encodeURIComponent(String(positionTicket))}`);
+  }
+
+  rates(symbol: string, timeframe: 'M1' | 'M5' | 'M15' | 'H1', count: number): Promise<Candle[]> {
+    return this.request(
+      `/market/rates/${encodeURIComponent(symbol)}?timeframe=${encodeURIComponent(timeframe)}&count=${Math.max(50, Math.min(1000, count))}`,
+    );
+  }
+
+  async dualRates(symbol: string): Promise<{ ltf: Candle[]; htf: Candle[] }> {
+    const [ltf, htf] = await Promise.all([
+      this.rates(symbol, 'M1', 220),
+      this.rates(symbol, 'M15', 260),
+    ]);
+    return { ltf, htf };
   }
 
   calculateSize(input: {
