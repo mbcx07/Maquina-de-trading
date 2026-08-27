@@ -1,19 +1,67 @@
 import { env } from './config.js';
+import type { TelegramCredentials } from './integrationVault.js';
 import type { TradeRecord } from './types.js';
 
 export class TelegramService {
-  isConfigured(): boolean {
-    return Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID);
+  constructor(private readonly getCredentials?: () => TelegramCredentials | null) {}
+
+  private credentials(): TelegramCredentials | null {
+    const fromVault = this.getCredentials?.();
+    if (fromVault?.botToken && fromVault?.chatId) return fromVault;
+    if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+      return { botToken: env.TELEGRAM_BOT_TOKEN, chatId: env.TELEGRAM_CHAT_ID };
+    }
+    return null;
   }
 
-  async send(text: string): Promise<void> {
-    if (!this.isConfigured()) return;
+  isConfigured(): boolean {
+    return Boolean(this.credentials());
+  }
 
-    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+  async testConnection(): Promise<{ ok: true; botUsername?: string; chatId: string }> {
+    const credentials = this.credentials();
+    if (!credentials) throw new Error('TELEGRAM_CREDENTIALS_NOT_CONFIGURED');
+
+    const meResponse = await fetch(`https://api.telegram.org/bot${credentials.botToken}/getMe`);
+    const meText = await meResponse.text();
+    let me: any;
+    try { me = JSON.parse(meText); } catch { me = null; }
+    if (!meResponse.ok || !me?.ok) {
+      throw new Error(`TELEGRAM_GETME_FAILED:${me?.description ?? meText.slice(0, 160)}`);
+    }
+
+    const testResponse = await fetch(`https://api.telegram.org/bot${credentials.botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: env.TELEGRAM_CHAT_ID,
+        chat_id: credentials.chatId,
+        text: '✅ Quantum Dual V34 conectado correctamente.',
+        disable_web_page_preview: true,
+      }),
+    });
+    const testText = await testResponse.text();
+    let test: any;
+    try { test = JSON.parse(testText); } catch { test = null; }
+    if (!testResponse.ok || !test?.ok) {
+      throw new Error(`TELEGRAM_SEND_TEST_FAILED:${test?.description ?? testText.slice(0, 160)}`);
+    }
+
+    return {
+      ok: true,
+      botUsername: me?.result?.username ? String(me.result.username) : undefined,
+      chatId: credentials.chatId,
+    };
+  }
+
+  async send(text: string): Promise<void> {
+    const credentials = this.credentials();
+    if (!credentials) return;
+
+    const response = await fetch(`https://api.telegram.org/bot${credentials.botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: credentials.chatId,
         text,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
