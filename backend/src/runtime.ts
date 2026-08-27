@@ -176,7 +176,6 @@ app.get('/api/state', async (_req, res) => {
         cryptoUniqueSymbols: [...new Set(activeCrypto.map((trade) => trade.symbol))],
       },
       recentTrades: trades.slice(0, 250),
-      backtests: historicalBacktest.list(10),
       metrics: {
         global: calculateMetrics(trades),
         crypto: calculateMetrics(trades, 'BINANCE'),
@@ -282,7 +281,19 @@ app.post('/api/scanners/forex/run', async (_req, res) => {
 
 app.get('/api/backtests', (req, res) => {
   const limit = Number(req.query.limit ?? 20);
-  res.json({ ok: true, runs: historicalBacktest.list(limit) });
+  const runs = historicalBacktest.list(limit).map((run: any) => ({
+    ...run,
+    result: run.result
+      ? {
+          metrics: run.result.metrics,
+          inSample: run.result.inSample,
+          outOfSample: run.result.outOfSample,
+          candidates: run.result.candidates,
+          completedAt: run.result.completedAt,
+        }
+      : null,
+  }));
+  res.json({ ok: true, runs });
 });
 
 app.get('/api/backtests/:id', (req, res) => {
