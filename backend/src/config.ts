@@ -28,6 +28,8 @@ const envSchema = z.object({
   CRYPTO_REQUESTED_LEVERAGE: z.coerce.number().int().min(1).max(125).default(20),
   CRYPTO_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
   CRYPTO_MIN_WINRATE: z.coerce.number().min(0).max(100).default(75),
+  PAPER_INITIAL_BALANCE: z.coerce.number().positive().default(100),
+  PAPER_ROUND_TRIP_COST_PCT: z.coerce.number().min(0).max(10).default(0.12),
 
   // Four pairs × two time-series requests × 72 cycles/day (20 min) ≈ 576 credits/day.
   // This leaves useful headroom under the current Twelve Data Basic 800/day allowance.
@@ -61,6 +63,8 @@ export function defaultSettings(): EngineSettings {
     cryptoMaxLossPctPerTrade: 1,
     cryptoMinSignalConfidence: env.CRYPTO_MIN_CONFIDENCE,
     cryptoMinRollingWinRate: env.CRYPTO_MIN_WINRATE,
+    paperInitialBalance: env.PAPER_INITIAL_BALANCE,
+    paperRoundTripCostPct: env.PAPER_ROUND_TRIP_COST_PCT,
 
     forexEnabled: true,
     forexExecutionMode: 'SIGNAL_ONLY',
