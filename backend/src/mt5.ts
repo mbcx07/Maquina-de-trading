@@ -38,6 +38,17 @@ export interface Mt5Position {
   timeMsc: number;
 }
 
+export interface Mt5MarketSnapshot {
+  symbol: string;
+  bid: number;
+  ask: number;
+  point: number;
+  digits: number;
+  spreadPoints: number;
+  spreadPrice: number;
+  timeMsc: number;
+}
+
 export interface Mt5Deal {
   ticket: number;
   order: number;
@@ -129,6 +140,10 @@ export class Mt5BridgeClient {
 
   positions(symbol?: string): Promise<Mt5Position[]> {
     return this.request(`/positions${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`);
+  }
+
+  marketSnapshot(symbol: string): Promise<Mt5MarketSnapshot> {
+    return this.request(`/market/snapshot/${encodeURIComponent(symbol)}`);
   }
 
   history(positionTicket: number): Promise<Mt5PositionHistory> {
