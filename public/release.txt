@@ -1,0 +1,4 @@
+QUANTUM DUAL V34 LINUX
+Release: 2026.08.27-R3
+Branch: feature/v34-dual-market-engine
+Includes: original V33.5 100xM1/210xM15 windows, PAPER anti-microclose, Binance profitable-only universe audit, Forex scan independent of Telegram, no-cache frontend shell.
