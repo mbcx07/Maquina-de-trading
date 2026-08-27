@@ -1,6 +1,6 @@
 import { env } from './config.js';
 import type { TelegramCredentials } from './integrationVault.js';
-import type { TradeRecord } from './types.js';
+import type { Opportunity, TradeRecord } from './types.js';
 
 export class TelegramService {
   constructor(private readonly getCredentials?: () => TelegramCredentials | null) {}
@@ -74,8 +74,33 @@ export class TelegramService {
     }
   }
 
+  async forexSignal(opportunity: Opportunity, retestNumber = 1): Promise<void> {
+    const rr = Math.abs(opportunity.takeProfit - opportunity.entry) / Math.max(Math.abs(opportunity.entry - opportunity.stopLoss), Number.EPSILON);
+    const reason = String(opportunity.metadata?.reason ?? 'Confluencia V34');
+    await this.send([
+      '📡 <b>SEÑAL FOREX · EJECUCIÓN MANUAL</b>',
+      `<b>Par:</b> ${opportunity.symbol}`,
+      `<b>Dirección:</b> ${opportunity.side}`,
+      `<b>Entrada referencia:</b> ${num(opportunity.entry)}`,
+      `<b>Stop Loss:</b> ${num(opportunity.stopLoss)}`,
+      `<b>Take Profit:</b> ${num(opportunity.takeProfit)}`,
+      opportunity.tp2 ? `<b>TP2:</b> ${num(opportunity.tp2)}` : '',
+      opportunity.tp3 ? `<b>TP3:</b> ${num(opportunity.tp3)}` : '',
+      `<b>R:R:</b> 1:${rr.toFixed(2)}`,
+      `<b>Timeframe:</b> ${opportunity.timeframe}`,
+      `<b>Confianza:</b> ${num(opportunity.confidence)}%`,
+      `<b>Rolling WR:</b> ${num(opportunity.rollingWinRate)}%`,
+      `<b>Score:</b> ${num(opportunity.score)}`,
+      `<b>Retest:</b> #${retestNumber}`,
+      `<b>Estrategia:</b> ${opportunity.strategy}`,
+      `<b>Motivo:</b> ${escapeHtml(reason)}`,
+      '',
+      '⚠️ <i>Señal informativa. V34 no abrirá operaciones Forex automáticamente.</i>',
+    ].filter(Boolean).join('\n'));
+  }
+
   async tradeOpened(trade: TradeRecord, slotText?: string): Promise<void> {
-    const market = trade.broker === 'BINANCE' ? 'CRYPTO / BINANCE FUTURES' : 'FOREX / MT5';
+    const market = trade.broker === 'BINANCE' ? 'CRYPTO / BINANCE FUTURES' : 'FOREX';
     const sizing = trade.broker === 'BINANCE'
       ? `Leverage: ${trade.leverage ?? '-'}x\nMargen: ${money(trade.marginUsed)}\nNocional: ${money(trade.notional)}`
       : `Lote: ${trade.lotSize ?? '-'}`;
@@ -118,7 +143,7 @@ export class TelegramService {
   }
 
   async alert(title: string, detail: string): Promise<void> {
-    await this.send(`⚠️ <b>${title}</b>\n${detail}`);
+    await this.send(`⚠️ <b>${escapeHtml(title)}</b>\n${escapeHtml(detail)}`);
   }
 }
 
@@ -135,4 +160,8 @@ function formatDuration(ms: number): string {
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[char] ?? char));
 }
