@@ -6,7 +6,8 @@ import { ForexDataClient } from './forexData.js';
 import { ForexSignalTracker } from './forexSignalTracker.js';
 import { TradingRepository } from './repositories.js';
 import { TelegramService } from './telegram.js';
-import type { EngineSettings, Opportunity } from './types.js';
+import type { EngineSettings, Opportunity, TradeSide } from './types.js';
+import type { Candle, AnalysisSignal } from './analysis.js';
 
 const LEGACY_DEFAULTS = ['EURUSD', 'GBPUSD', 'USDJPY', 'EURJPY'];
 const EXPANDED_DEFAULTS = [
@@ -15,7 +16,16 @@ const EXPANDED_DEFAULTS = [
   'GBPJPY', 'AUDJPY', 'EURGBP', 'EURAUD',
   'XAUUSD', 'NAS100',
 ];
-const BASIC_DAILY_BUDGET_TARGET = 720; // keep headroom under the 800/day Basic cap
+const BASIC_DAILY_BUDGET_TARGET = 720;
+const RECENT_SETUP_LOOKBACK_MINUTES = 30;
+
+interface TriggeredSignal {
+  signal: AnalysisSignal;
+  ltfWindow: Candle[];
+  htfWindow: Candle[];
+  candleTime: number;
+  triggerLagMinutes: number;
+}
 
 export class ForexMarketScanner {
   private running = false;
@@ -52,15 +62,15 @@ export class ForexMarketScanner {
     this.ensureExpandedDefaults();
     const settings = this.getSettings();
     if (!settings.engineEnabled && !forceManual) {
-      this.saveState({ status: 'PAUSED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', performance: this.tracker.summary(20) });
+      this.saveState({ status: 'PAUSED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, performance: this.tracker.summary(20) });
       return;
     }
     if (!settings.forexEnabled) {
-      this.saveState({ status: 'DISABLED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', performance: this.tracker.summary(20) });
+      this.saveState({ status: 'DISABLED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, performance: this.tracker.summary(20) });
       return;
     }
     if (!this.market.hasCredentials()) {
-      this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY', performance: this.tracker.summary(20) });
+      this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, performance: this.tracker.summary(20) });
       return;
     }
 
@@ -76,13 +86,15 @@ export class ForexMarketScanner {
 
     try {
       this.saveState({
-        status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
-        trigger: forceManual ? 'MANUAL' : 'SCHEDULED',
+        status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
+        trigger: forceManual ? 'API_FORCE' : 'AUTOMATIC',
         telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, total: symbols.length, scanned: 0, signals: 0, errors: 0,
         configuredIntervalMinutes: settings.forexSignalScanIntervalMinutes,
         effectiveIntervalMinutes,
         estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
+        requestModel: 'ONE_M1_REQUEST_DERIVE_M15',
+        recentSetupLookbackMinutes: RECENT_SETUP_LOOKBACK_MINUTES,
         symbols,
         performance: this.tracker.summary(20),
       });
@@ -105,14 +117,16 @@ export class ForexMarketScanner {
         }
 
         this.saveState({
-          status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
-          trigger: forceManual ? 'MANUAL' : 'SCHEDULED',
+          status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
+          trigger: forceManual ? 'API_FORCE' : 'AUTOMATIC',
           telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
           startedAt, total: symbols.length, scanned, current: symbol,
           signals: freshSignals.length, errors, usage: this.market.getUsage(), symbols,
           configuredIntervalMinutes: settings.forexSignalScanIntervalMinutes,
           effectiveIntervalMinutes,
           estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
+          requestModel: 'ONE_M1_REQUEST_DERIVE_M15',
+          recentSetupLookbackMinutes: RECENT_SETUP_LOOKBACK_MINUTES,
           performance: this.tracker.summary(20),
         });
       }
@@ -156,13 +170,13 @@ export class ForexMarketScanner {
       const diagnostic = rateLimited
         ? 'TWELVE_DATA_RATE_LIMIT_OR_DAILY_QUOTA'
         : freshSignals.length === 0 && errors === 0
-          ? 'NO_VALID_SETUP_NOW'
+          ? 'NO_ACTIONABLE_SETUP_IN_RECENT_WINDOW'
           : undefined;
 
       this.saveState({
         status,
-        mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
-        trigger: forceManual ? 'MANUAL' : 'SCHEDULED',
+        mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
+        trigger: forceManual ? 'API_FORCE' : 'AUTOMATIC',
         telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, completedAt: Date.now(), total: symbols.length, scanned,
         signals: freshSignals.length, qualified: qualified.length, sent, errors, deliveryErrors,
@@ -172,6 +186,8 @@ export class ForexMarketScanner {
         effectiveIntervalMinutes,
         estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
         nextScanMinutes: effectiveIntervalMinutes,
+        requestModel: 'ONE_M1_REQUEST_DERIVE_M15',
+        recentSetupLookbackMinutes: RECENT_SETUP_LOOKBACK_MINUTES,
         symbols,
         performance: this.tracker.summary(40),
       });
@@ -186,7 +202,7 @@ export class ForexMarketScanner {
       await this.runCycle(false);
     } catch (error) {
       this.saveState({
-        status: 'ERROR', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+        status: 'ERROR', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
         error: error instanceof Error ? error.message : String(error), at: Date.now(),
         performance: this.tracker.summary(20),
       });
@@ -207,12 +223,10 @@ export class ForexMarketScanner {
       throw new Error(`FOREX_INSUFFICIENT_CANDLES:${symbol}:${dataSymbol}:ltf=${ltf.length}:htf=${htf.length}`);
     }
 
-    // Resolve previous virtual Forex signals from these same candles. No extra API
-    // request is needed, so performance statistics do not consume additional credits.
     this.tracker.updateFromCandles(symbol, ltf);
 
-    const signal = analyzeStructureStrategyV335(ltf, htf, symbol);
-    if (!signal) {
+    const triggered = findLatestActionableSignal(ltf, htf, symbol, RECENT_SETUP_LOOKBACK_MINUTES);
+    if (!triggered) {
       this.signalZoneActive.set(symbol, false);
       return null;
     }
@@ -220,13 +234,16 @@ export class ForexMarketScanner {
     if (this.signalZoneActive.get(symbol) === true) return null;
     this.signalZoneActive.set(symbol, true);
 
-    const backtest = runRollingBacktestV335(symbol, ltf, htf);
-    const rollingWinRate = backtest.tradesEvaluated === 0 ? signal.confidence : backtest.winRate;
-    const score = opportunityScore(signal, backtest, 60);
-    const candleTime = ltf.at(-1)?.time ?? Date.now();
+    const currentPrice = ltf.at(-1)!.close;
+    const rebased = rebaseSignalAtCurrentPrice(triggered.signal, currentPrice);
+    if (!rebased) return null;
+
+    const backtest = runRollingBacktestV335(symbol, triggered.ltfWindow, triggered.htfWindow);
+    const rollingWinRate = backtest.tradesEvaluated === 0 ? rebased.confidence : backtest.winRate;
+    const score = opportunityScore(rebased, backtest, 60);
     const fingerprint = sha256([
-      'FOREX-SIGNAL', symbol, dataSymbol, signal.side, signal.strategy, String(candleTime),
-      roundKey(signal.stopLoss), roundKey(signal.takeProfit),
+      'FOREX-SIGNAL-R9', symbol, dataSymbol, rebased.side, rebased.strategy, String(triggered.candleTime),
+      roundKey(rebased.stopLoss), roundKey(rebased.takeProfit),
     ].join('|'));
 
     return {
@@ -235,28 +252,30 @@ export class ForexMarketScanner {
       signalFingerprint: fingerprint,
       broker: 'MT5',
       symbol,
-      side: signal.side,
+      side: rebased.side,
       timeframe: '1m/15m',
-      strategy: signal.strategy,
-      confidence: signal.confidence,
+      strategy: rebased.strategy,
+      confidence: rebased.confidence,
       rollingWinRate,
       expectancy: backtest.expectancyPct,
       score,
-      entry: signal.entry,
-      stopLoss: signal.stopLoss,
-      takeProfit: signal.takeProfit,
-      tp2: signal.tp2,
-      tp3: signal.tp3,
+      entry: rebased.entry,
+      stopLoss: rebased.stopLoss,
+      takeProfit: rebased.takeProfit,
+      tp2: rebased.tp2,
+      tp3: rebased.tp3,
       createdAt: Date.now(),
       metadata: {
         executionMode: 'SIGNAL_ONLY',
         dataProvider: 'TWELVE_DATA',
         dataSymbol,
-        reason: signal.reason,
-        atr: signal.atr,
+        reason: rebased.reason,
+        atr: rebased.atr,
         backtest,
         rollingWinRateSource: backtest.tradesEvaluated === 0 ? 'SIGNAL_CONFIDENCE_NO_BACKTEST_TRADES' : 'ROLLING_BACKTEST',
-        candleTime,
+        candleTime: triggered.candleTime,
+        triggerLagMinutes: triggered.triggerLagMinutes,
+        reanchoredAtCurrentPrice: triggered.triggerLagMinutes > 0,
         decisionWindows: { m1: 100, m15: 210 },
       },
     };
@@ -270,16 +289,16 @@ export class ForexMarketScanner {
     this.database.saveSettings({
       ...settings,
       forexSymbols: EXPANDED_DEFAULTS,
-      // 14 instruments × 2 timeframes × 24 hourly cycles = 672 credits/day.
-      forexSignalScanIntervalMinutes: Math.max(60, settings.forexSignalScanIntervalMinutes),
+      // 14 instruments × 1 request × 48 cycles/day (30 min) = 672 credits/day.
+      forexSignalScanIntervalMinutes: Math.max(30, settings.forexSignalScanIntervalMinutes),
       forexSignalsPerCycle: Math.max(6, settings.forexSignalsPerCycle),
       forexExecutionMode: 'SIGNAL_ONLY',
     });
   }
 
   private effectiveIntervalMinutes(settings: EngineSettings, symbolCount: number): number {
-    const configured = Math.max(1, Number(settings.forexSignalScanIntervalMinutes || 60));
-    const minimumForDailyBudget = Math.ceil(Math.max(1, symbolCount) * 2 * 1440 / BASIC_DAILY_BUDGET_TARGET);
+    const configured = Math.max(1, Number(settings.forexSignalScanIntervalMinutes || 30));
+    const minimumForDailyBudget = Math.ceil(Math.max(1, symbolCount) * 1440 / BASIC_DAILY_BUDGET_TARGET);
     return Math.max(configured, minimumForDailyBudget);
   }
 
@@ -329,6 +348,73 @@ export class ForexMarketScanner {
   }
 }
 
+function findLatestActionableSignal(
+  ltf: Candle[],
+  htf: Candle[],
+  symbol: string,
+  lookbackMinutes: number,
+): TriggeredSignal | null {
+  const lastIndex = ltf.length - 1;
+  const firstIndex = Math.max(99, lastIndex - Math.max(0, lookbackMinutes));
+  const currentPrice = ltf[lastIndex]?.close ?? 0;
+
+  for (let i = lastIndex; i >= firstIndex; i--) {
+    const ltfWindow = ltf.slice(i - 99, i + 1);
+    if (ltfWindow.length !== 100) continue;
+    const candleTime = ltf[i].time;
+    const eligibleHtf = htf.filter((candle) => candle.time <= candleTime).slice(-210);
+    if (eligibleHtf.length !== 210) continue;
+
+    const signal = analyzeStructureStrategyV335(ltfWindow, eligibleHtf, symbol);
+    if (!signal || !isStillActionable(signal, currentPrice)) continue;
+
+    return {
+      signal,
+      ltfWindow,
+      htfWindow: eligibleHtf,
+      candleTime,
+      triggerLagMinutes: Math.max(0, Math.round((ltf[lastIndex].time - candleTime) / 60_000)),
+    };
+  }
+  return null;
+}
+
+function isStillActionable(signal: AnalysisSignal, currentPrice: number): boolean {
+  if (!(currentPrice > 0)) return false;
+  const risk = Math.abs(signal.entry - signal.stopLoss);
+  if (!(risk > 0)) return false;
+
+  if (signal.side === 'BUY') {
+    if (currentPrice <= signal.stopLoss || currentPrice >= signal.takeProfit) return false;
+    const progress = currentPrice - signal.entry;
+    return progress <= risk * 0.45 && progress >= -risk * 0.35;
+  }
+
+  if (currentPrice >= signal.stopLoss || currentPrice <= signal.takeProfit) return false;
+  const progress = signal.entry - currentPrice;
+  return progress <= risk * 0.45 && progress >= -risk * 0.35;
+}
+
+function rebaseSignalAtCurrentPrice(signal: AnalysisSignal, currentPrice: number): AnalysisSignal | null {
+  if (!(currentPrice > 0)) return null;
+  const risk = signal.side === 'BUY'
+    ? currentPrice - signal.stopLoss
+    : signal.stopLoss - currentPrice;
+  if (!(risk > 0)) return null;
+
+  const takeProfit = signal.side === 'BUY' ? currentPrice + risk * 1.35 : currentPrice - risk * 1.35;
+  const tp2 = signal.side === 'BUY' ? currentPrice + risk * 2.2 : currentPrice - risk * 2.2;
+  const tp3 = signal.side === 'BUY' ? currentPrice + risk * 3.5 : currentPrice - risk * 3.5;
+  return {
+    ...signal,
+    entry: currentPrice,
+    takeProfit,
+    tp2,
+    tp3,
+    reason: `${signal.reason}_RECENT_ACTIONABLE`,
+  };
+}
+
 function normalizeDisplaySymbol(symbol: string): string {
   return symbol.trim().toUpperCase().replace(/\//g, '').replace(/\s+/g, '');
 }
@@ -341,7 +427,7 @@ function sameSet(a: string[], b: string[]): boolean {
 }
 
 function estimateDailyCredits(symbolCount: number, intervalMinutes: number): number {
-  return Math.ceil(Math.max(1, symbolCount) * 2 * (1440 / Math.max(1, intervalMinutes)));
+  return Math.ceil(Math.max(1, symbolCount) * (1440 / Math.max(1, intervalMinutes)));
 }
 
 function isRateLimitError(error: unknown): boolean {
