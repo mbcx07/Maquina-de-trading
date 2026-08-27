@@ -1,38 +1,34 @@
 # Quantum Dual V34 — Linux Individual
 
-## Objetivo de esta edición
+## Alcance de esta edición
 
-Esta es la primera edición de validación individual.
+Primera versión para validar estabilidad y rentabilidad antes de membresías:
 
 - **Crypto / Binance USD-M Futures:** ejecución automática.
-- **Forex:** análisis automático y señales Telegram únicamente.
-- **No MT5.**
-- **No Wine.**
-- **No ejecución Forex automática.**
-- SQLite y bóveda de credenciales permanecen en un volumen Docker persistente.
+- **Forex:** análisis automático y señales Telegram para ejecución manual.
+- **Sin MT5 y sin Wine.**
+- **SQLite + bóveda cifrada** en volumen Docker persistente.
+- El dashboard no se publica directamente a Internet por defecto.
 
 ## Arquitectura
 
 ```text
-Internet
+Navegador
    |
+   | túnel SSH / VPN privada
    v
-Nginx / Frontend :8080
-   |
-   v
-Backend V34 :8787 (red Docker interna)
-   |-- SQLite + Vault AES-256-GCM
-   |-- Binance Futures API
-   |-- Binance Market Data
-   |-- Twelve Data Forex Market Data
-   `-- Telegram Bot API
+127.0.0.1:8080 -> Nginx / React
+                     |
+                     v
+              Backend V34 :8787
+                |-- SQLite + Vault AES-256-GCM
+                |-- Binance Futures API
+                |-- Binance Market Data
+                |-- Twelve Data Forex Data
+                `-- Telegram Bot API
 ```
 
-Solo el puerto `8080` se publica por defecto.
-
-## Requisitos Linux
-
-Probado/objetivo:
+## Requisitos
 
 - Ubuntu 22.04/24.04 o Debian moderno.
 - Git.
@@ -57,84 +53,85 @@ docker compose -f docker-compose.linux.yml ps
 docker compose -f docker-compose.linux.yml logs -f backend
 ```
 
-Abrir en navegador:
+## Acceso seguro al dashboard
+
+Docker publica la interfaz solamente en `127.0.0.1:8080` del VPS.
+
+Desde tu computadora crea un túnel SSH:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 USUARIO@IP_DEL_VPS
+```
+
+Mientras esa sesión SSH permanezca abierta, entra en tu navegador a:
 
 ```text
-http://IP_DEL_SERVIDOR:8080
+http://127.0.0.1:8080
 ```
+
+No cambies el binding a `0.0.0.0:8080` sin colocar antes autenticación HTTPS, firewall o una VPN privada como Tailscale. El dashboard permite controlar un motor de trading y no debe quedar público.
 
 ## Persistencia
 
-El volumen `v34_data` contiene:
+El volumen Docker `v34_data` contiene:
 
 - `trading-v34.sqlite`
 - `.integration-vault-key`
+- configuración
+- credenciales cifradas
+- historial Binance
+- métricas
+- señales Forex
+- backtests
 
-No borrar ese volumen si se desea conservar:
+No uses `docker compose ... down -v` salvo que quieras borrar deliberadamente todos esos datos.
 
-- configuración;
-- claves cifradas;
-- historial de operaciones;
-- métricas;
-- señales Forex;
-- backtests.
-
-Backup recomendado:
-
-```bash
-docker run --rm \
-  -v maquina-de-trading_v34_data:/source:ro \
-  -v "$PWD":/backup \
-  alpine sh -c 'cd /source && tar czf /backup/v34-data-backup.tgz .'
-```
-
-## Primera configuración
-
-Entrar a **Configuración** en V34.
+## Configuración desde la aplicación
 
 ### Binance Futures
 
-Introducir:
+En **Configuración > Binance Futures** introduce:
 
 - API Key
 - API Secret
 
-Recomendaciones:
+Reglas de seguridad:
 
-- habilitar únicamente los permisos necesarios para Futures;
-- deshabilitar withdrawals;
-- en REAL usar whitelist de la IP pública fija del VPS;
-- usar claves nuevas, no las que alguna vez estuvieron en el repositorio público.
+- habilita solo los permisos necesarios para Futures;
+- deshabilita retiros;
+- para REAL usa whitelist de la IP fija del VPS;
+- usa claves nuevas, nunca claves que hayan aparecido en un repositorio público.
 
-Empezar en `PAPER`, después `BINANCE TESTNET` y solo posteriormente `REAL`.
+Orden recomendado:
+
+```text
+PAPER -> BINANCE TESTNET -> REAL
+```
 
 ### Telegram
 
-Introducir:
+En **Configuración > Telegram** introduce:
 
 - Bot Token
 - Chat ID / canal
 
-`Guardar y conectar` envía automáticamente un mensaje de prueba.
+`Guardar y conectar` envía un mensaje de prueba.
 
 Telegram recibe:
 
 - apertura Crypto;
 - cierre Crypto;
 - PnL y win rate;
-- alertas de riesgo;
-- errores de protección;
-- señales Forex manuales.
+- alertas de riesgo y errores;
+- señales Forex para ejecución manual.
 
 ### Forex Data
 
-Forex usa Twelve Data únicamente como proveedor de datos.
+En **Configuración > Forex Data** introduce una API Key de Twelve Data.
 
-Introducir la API Key en la tarjeta **FOREX DATA**.
+Esta integración es únicamente de lectura de mercado. No tiene capacidad para abrir, modificar ni cerrar operaciones.
 
-V34 solicita series `1min` y `15min` para cada par configurado.
-
-Símbolos V34:
+Configuración inicial V34:
 
 ```text
 EURUSD
@@ -143,102 +140,73 @@ USDJPY
 EURJPY
 ```
 
-El cliente transforma internamente `EURUSD` a `EUR/USD` para el proveedor.
+El motor transforma internamente, por ejemplo, `EURUSD` a `EUR/USD`.
 
-Configuración inicial conservadora:
+Por defecto usa series de 1 minuto y 15 minutos. El intervalo del scanner y los pares pueden cambiarse desde la interfaz.
 
-- 4 pares;
-- escaneo cada 15 minutos;
-- máximo 4 señales por ciclo.
-
-La propia UI muestra una estimación de créditos por día.
-
-## Regla Binance
+## Regla Binance: 10 coins distintas
 
 Máximo absoluto: **10 posiciones Crypto simultáneas**.
 
-Cada posición debe ser una coin diferente.
+Cada posición debe tener símbolo diferente. Mientras `BTCUSDT` siga abierto, otra señal `BTCUSDT` no puede abrir una segunda posición.
 
-Ejemplo válido:
-
-```text
-BTCUSDT
-ETHUSDT
-SOLUSDT
-XRPUSDT
-BNBUSDT
-DOGEUSDT
-ADAUSDT
-AVAXUSDT
-LINKUSDT
-SUIUSDT
-```
-
-Ejemplo inválido:
-
-```text
-BTCUSDT posición 1
-BTCUSDT posición 2
-```
-
-Mientras BTCUSDT permanezca activo, una nueva oportunidad BTCUSDT queda bloqueada.
-
-## Regla de capital Crypto
+## Capital Crypto
 
 Ejemplo:
 
 ```text
-Futures balance = $100
-Margen/trade = 1%
+Balance Futures = $100
+Margen por operación = 1%
 Leverage solicitado = 20x
 ```
 
-Objetivo:
+Resultado objetivo:
 
 ```text
 Margen = $1
 Nocional aproximado = $20
 ```
 
-Si la coin permite máximo 10x:
+Si Binance limita ese símbolo a 10x:
 
 ```text
 Margen = $1
 Nocional aproximado = $10
 ```
 
-Si Binance no permite el tamaño mínimo requerido, V34 **omite** la operación. No aumenta silenciosamente el porcentaje configurado.
+Si la cantidad calculada no cumple el mínimo de Binance, V34 omite la operación y no aumenta el porcentaje configurado.
 
 ## Forex Signal Only
 
-Forex nunca ejecuta órdenes.
+Forex **nunca envía órdenes a un broker** en esta edición.
 
-Cada señal enviada a Telegram contiene:
+Una alerta puede contener:
 
 - par;
 - BUY/SELL;
 - entrada de referencia;
 - SL;
-- TP;
-- TP2/TP3 cuando existan;
+- TP / TP2 / TP3;
 - R:R;
 - timeframe;
 - confianza;
 - rolling win rate;
 - score;
 - número de retest;
-- estrategia/motivo.
+- estrategia y motivo.
 
-Una señal consecutiva dentro de la misma zona no se repite. Para generar un nuevo retest el setup debe dejar de ser válido y posteriormente volver a activarse.
+La misma zona de setup no genera mensajes repetidos continuamente. Para considerarse retest nuevo, el setup debe dejar de ser válido y posteriormente activarse otra vez.
 
 ## Arranque del motor
 
-El motor no inicia Forex si falta:
+Si Forex está habilitado, el motor exige:
 
-- API Key de Forex Data; o
-- Telegram.
+- Forex Data configurado;
+- Telegram configurado.
 
-En `TESTNET`/`REAL`, Crypto tampoco inicia si faltan las credenciales Binance.
+En TESTNET o REAL, si Crypto está habilitado también exige Binance configurado.
+
+El botón **PAUSE ENGINE** bloquea nuevas entradas Binance y nuevas señales Forex.
 
 ## Emergency Stop
 
@@ -246,34 +214,31 @@ En `TESTNET`/`REAL`, Crypto tampoco inicia si faltan las credenciales Binance.
 
 - bloquea nuevas entradas Binance;
 - bloquea nuevas señales Forex;
-- mantiene posiciones Binance existentes con sus protecciones.
+- conserva las posiciones Binance existentes con sus SL/TP.
 
 ### CLOSE_TRACKED
 
 - pausa el motor;
-- solicita cierre reduce-only de las posiciones Binance registradas por V34;
-- Forex no necesita cierres porque no abre operaciones.
+- solicita cierre reduce-only de las posiciones Binance gestionadas por V34;
+- Forex no necesita cierres porque no abre posiciones.
 
 ## Backtest
 
-La edición Linux muestra por ahora **Backtest Binance**.
-
-Incluye:
+La edición Linux muestra por ahora **Backtest Binance** y calcula, entre otras métricas:
 
 - net profit;
 - return;
 - win rate;
-- profit factor;
+- Profit Factor;
 - expectancy;
 - max drawdown;
 - costos;
-- trades;
 - resultados por símbolo;
 - bloque out-of-sample.
 
-El rolling backtest del scanner no sustituye la prueba histórica de rentabilidad.
+El rolling backtest utilizado por el scanner sirve para ranking; no sustituye la validación histórica de rentabilidad.
 
-## Actualizar la aplicación
+## Actualización
 
 ```bash
 git pull
@@ -281,28 +246,23 @@ docker compose -f docker-compose.linux.yml build
 docker compose -f docker-compose.linux.yml up -d
 ```
 
-El volumen de datos no se elimina con esos comandos.
+El volumen persistente se conserva.
 
-## Apagar
+## Apagar / reiniciar
 
 ```bash
 docker compose -f docker-compose.linux.yml down
-```
-
-Para reiniciar:
-
-```bash
 docker compose -f docker-compose.linux.yml up -d
 ```
 
-No usar `down -v` salvo que se quiera borrar deliberadamente la base, historial y bóveda.
-
-## Secuencia recomendada de validación
+## Secuencia de validación
 
 1. PAPER.
-2. Backtest de varias ventanas Binance.
-3. Verificar señales Forex Telegram.
+2. Backtest Binance en varias ventanas históricas.
+3. Confirmar calidad y formato de señales Forex Telegram.
 4. Binance Testnet.
-5. Acumular operaciones y evaluar métricas.
-6. Ajustar estrategia/filtros si es necesario.
-7. REAL solo después de validar ejecución, SL/TP, reconciliación, costos y drawdown.
+5. Acumular suficientes operaciones y revisar profit neto, Profit Factor, expectancy, costos y drawdown.
+6. Ajustar estrategia/filtros si hace falta.
+7. REAL solo después de validar ejecución, SL/TP, reconciliación y límites de riesgo.
+
+Las membresías permanecen fuera de alcance hasta demostrar resultados consistentes en esta instalación individual.
