@@ -4,7 +4,7 @@ import { auditV335Symbol, defaultAuditRules, type SymbolAuditResult } from './un
 
 const DAY = 24 * 60 * 60_000;
 const ERROR_BACKOFF_MS = 15 * 60_000;
-const AUDIT_MODEL = 'V33.5_M5_M15_H45';
+const AUDIT_MODEL = 'R10_HIGH_WINRATE_SWEEP_M5_M15_H45';
 
 export interface UniverseAuditState {
   status: 'IDLE' | 'RUNNING' | 'COMPLETED' | 'ERROR';
@@ -42,7 +42,8 @@ export class UniverseQualificationService {
   }
 
   getQualifiedSymbols(): string[] {
-    return this.getState().qualifiedSymbols ?? [];
+    const state = this.getState();
+    return String(state.rules?.exitModel ?? '') === AUDIT_MODEL ? (state.qualifiedSymbols ?? []) : [];
   }
 
   shouldRefresh(maxAgeDays = 7): boolean {
@@ -50,12 +51,8 @@ export class UniverseQualificationService {
     const state = this.getState();
     const modelMismatch = String(state.rules?.exitModel ?? '') !== AUDIT_MODEL;
     if (modelMismatch) return true;
-    if (state.status === 'COMPLETED' && state.completedAt) {
-      return Date.now() - state.completedAt > maxAgeDays * DAY;
-    }
-    if (state.status === 'ERROR' && state.completedAt) {
-      return Date.now() - state.completedAt >= ERROR_BACKOFF_MS;
-    }
+    if (state.status === 'COMPLETED' && state.completedAt) return Date.now() - state.completedAt > maxAgeDays * DAY;
+    if (state.status === 'ERROR' && state.completedAt) return Date.now() - state.completedAt >= ERROR_BACKOFF_MS;
     return true;
   }
 
@@ -67,7 +64,7 @@ export class UniverseQualificationService {
   async run(days = 14): Promise<UniverseAuditState> {
     if (this.running) return this.getState();
     this.running = true;
-    const endTime = Date.now() - 60_000;
+    const endTime = Date.now() - 5 * 60_000;
     const startTime = endTime - Math.max(3, Math.min(31, days)) * DAY;
     const rules = defaultAuditRules(startTime, endTime);
     const results: SymbolAuditResult[] = [];
@@ -116,12 +113,12 @@ export class UniverseQualificationService {
       return state;
     } catch (error) {
       const previous = this.getState();
+      const sameModel = String(previous.rules?.exitModel ?? '') === AUDIT_MODEL;
       const state: UniverseAuditState = {
         status: 'ERROR', startedAt, completedAt: Date.now(),
         error: error instanceof Error ? error.message : String(error),
-        // Do not trust symbols qualified under a previous timeframe model.
-        qualifiedSymbols: String(previous.rules?.exitModel ?? '') === AUDIT_MODEL ? (previous.qualifiedSymbols ?? []) : [],
-        results: String(previous.rules?.exitModel ?? '') === AUDIT_MODEL ? (previous.results ?? []) : [],
+        qualifiedSymbols: sameModel ? (previous.qualifiedSymbols ?? []) : [],
+        results: sameModel ? (previous.results ?? []) : [],
         errors: previous.errors ?? [],
         rules: { ...rules, days },
       };
