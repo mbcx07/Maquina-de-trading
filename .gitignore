@@ -12,6 +12,24 @@ dist
 dist-ssr
 *.local
 
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+mt5-bridge/.env
+mt5-bridge/.env.*
+!mt5-bridge/.env.example
+
+# Persistent local runtime data and encryption key
+backend/data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.integration-vault-key
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
