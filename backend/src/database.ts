@@ -54,6 +54,7 @@ export class TradingDatabase {
       CREATE TABLE IF NOT EXISTS trades (
         id TEXT PRIMARY KEY,
         broker TEXT NOT NULL CHECK (broker IN ('BINANCE','MT5')),
+        execution_mode TEXT NOT NULL DEFAULT 'REAL',
         symbol TEXT NOT NULL,
         side TEXT NOT NULL CHECK (side IN ('BUY','SELL')),
         strategy TEXT NOT NULL,
@@ -144,6 +145,18 @@ export class TradingDatabase {
         updated_at INTEGER NOT NULL
       );
     `);
+
+    // Existing V34 databases predate execution_mode. Add it without destroying any
+    // history, then identify legacy PAPER rows by their synthetic broker order id.
+    const columns = this.db.pragma('table_info(trades)') as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'execution_mode')) {
+      this.db.exec(`ALTER TABLE trades ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'REAL'`);
+      this.db.prepare(`
+        UPDATE trades SET execution_mode='PAPER'
+        WHERE broker='BINANCE' AND broker_order_id LIKE 'PAPER-%'
+      `).run();
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_trades_execution_mode ON trades(execution_mode, created_at DESC)`);
   }
 
   getSettings(): EngineSettings | null {
@@ -175,13 +188,13 @@ export class TradingDatabase {
   createTrade(trade: TradeRecord): void {
     const stmt = this.db.prepare(`
       INSERT INTO trades(
-        id, broker, symbol, side, strategy, timeframe, confidence, rolling_win_rate,
+        id, broker, execution_mode, symbol, side, strategy, timeframe, confidence, rolling_win_rate,
         entry_price, exit_price, stop_loss, take_profit, tp2, tp3, leverage, lot_size,
         margin_used, notional, commission, funding_or_swap, unrealized_pnl, realized_pnl,
         state, close_reason, broker_order_id, signal_id, signal_fingerprint, open_time,
         close_time, created_at, updated_at, metadata
       ) VALUES (
-        @id, @broker, @symbol, @side, @strategy, @timeframe, @confidence, @rollingWinRate,
+        @id, @broker, @executionMode, @symbol, @side, @strategy, @timeframe, @confidence, @rollingWinRate,
         @entryPrice, @exitPrice, @stopLoss, @takeProfit, @tp2, @tp3, @leverage, @lotSize,
         @marginUsed, @notional, @commission, @fundingOrSwap, @unrealizedPnl, @realizedPnl,
         @state, @closeReason, @brokerOrderId, @signalId, @signalFingerprint, @openTime,
@@ -191,6 +204,7 @@ export class TradingDatabase {
 
     stmt.run({
       ...trade,
+      executionMode: trade.executionMode ?? 'REAL',
       exitPrice: trade.exitPrice ?? null,
       tp2: trade.tp2 ?? null,
       tp3: trade.tp3 ?? null,
@@ -220,6 +234,7 @@ function mapTradeRow(row: Record<string, unknown>): TradeRecord {
   return {
     id: String(row.id),
     broker: row.broker as Broker,
+    executionMode: String(row.execution_mode ?? 'REAL') as TradeRecord['executionMode'],
     symbol: String(row.symbol),
     side: row.side as TradeRecord['side'],
     strategy: String(row.strategy),
