@@ -32,14 +32,21 @@ echo "[4/6] Estado Docker:"
 sudo docker compose -f "$COMPOSE" ps
 
 echo "[5/6] Verificando backend..."
+BACKEND_OK=0
 for i in {1..30}; do
   if curl -fsS http://127.0.0.1:8080/backend/health >/tmp/v34-health.json 2>/dev/null; then
     cat /tmp/v34-health.json
     echo
+    BACKEND_OK=1
     break
   fi
   sleep 1
 done
+if [[ "$BACKEND_OK" -ne 1 ]]; then
+  echo "ERROR: backend no respondió por el proxy después del despliegue."
+  sudo docker compose -f "$COMPOSE" logs --tail=80 backend
+  exit 4
+fi
 
 echo "[6/6] Verificando release servido por el frontend..."
 if curl -fsS -H 'Cache-Control: no-cache' "http://127.0.0.1:8080/release.txt?ts=$(date +%s)"; then
