@@ -1,19 +1,23 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { z } from 'zod';
 import { BinanceUsdmClient } from './binance.js';
 import { IntegrationVault, normalizeWorkspaceId, type IntegrationProvider } from './integrationVault.js';
 import { TelegramService } from './telegram.js';
 import type { EngineSettings } from './types.js';
 
+export type WorkspaceResolver = (req: Request) => string;
+
 export function createIntegrationRouter(
   vault: IntegrationVault,
   getSettings: () => EngineSettings,
+  resolveWorkspaceId: WorkspaceResolver,
 ): Router {
   const router = Router();
+  const workspaceFor = (req: Request) => normalizeWorkspaceId(resolveWorkspaceId(req));
 
   router.get('/', (req, res) => {
     try {
-      const workspaceId = workspaceFrom(req.header('X-Workspace-Id'));
+      const workspaceId = workspaceFor(req);
       res.json({
         ok: true,
         workspaceId,
@@ -26,7 +30,7 @@ export function createIntegrationRouter(
 
   router.put('/binance', async (req, res) => {
     try {
-      const workspaceId = workspaceFrom(req.header('X-Workspace-Id'));
+      const workspaceId = workspaceFor(req);
       const body = z.object({
         apiKey: z.string().min(8).max(512),
         apiSecret: z.string().min(8).max(512),
@@ -47,7 +51,7 @@ export function createIntegrationRouter(
 
   router.put('/telegram', async (req, res) => {
     try {
-      const workspaceId = workspaceFrom(req.header('X-Workspace-Id'));
+      const workspaceId = workspaceFor(req);
       const body = z.object({
         botToken: z.string().min(10).max(512),
         chatId: z.string().min(1).max(128),
@@ -68,7 +72,7 @@ export function createIntegrationRouter(
 
   router.post('/:provider/test', async (req, res) => {
     try {
-      const workspaceId = workspaceFrom(req.header('X-Workspace-Id'));
+      const workspaceId = workspaceFor(req);
       const provider = providerFrom(req.params.provider);
       const test = provider === 'BINANCE'
         ? await testBinance(vault, workspaceId, getSettings)
@@ -87,7 +91,7 @@ export function createIntegrationRouter(
 
   router.delete('/:provider', (req, res) => {
     try {
-      const workspaceId = workspaceFrom(req.header('X-Workspace-Id'));
+      const workspaceId = workspaceFor(req);
       const provider = providerFrom(req.params.provider);
       vault.remove(workspaceId, provider);
       res.json({
@@ -141,10 +145,6 @@ async function testTelegram(
     vault.markTest(workspaceId, 'TELEGRAM', false, detail);
     return { ok: false, error: detail };
   }
-}
-
-function workspaceFrom(header: string | undefined): string {
-  return normalizeWorkspaceId(header);
 }
 
 function providerFrom(value: string | undefined): IntegrationProvider {
