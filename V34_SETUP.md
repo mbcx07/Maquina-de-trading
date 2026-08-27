@@ -1,57 +1,118 @@
-# Quantum Dual V34 — Setup
+# Quantum Dual V34 — Prueba individual
 
-## Estado de esta rama
+## Objetivo actual
 
-La rama `feature/v34-dual-market-engine` separa por completo el frontend de la ejecución firmada.
+Antes de construir membresías, probar V34 como una sola instalación y medir si el sistema es rentable y estable.
 
-Arquitectura:
+Arquitectura individual:
 
-`React dashboard -> V34 backend + SQLite -> Binance / MT5 bridge -> Telegram`
+`Dashboard React -> Backend V34 + SQLite -> Binance Futures / MT5 Bridge -> Telegram`
 
-## Reglas implementadas
+## 1. Binance
 
-### Binance Futures
+Desde `Configuración > Integraciones`:
 
-- Máximo 10 posiciones simultáneas.
-- Cada posición Crypto debe ser de un símbolo diferente.
-- Mientras `BTCUSDT` esté activo, ninguna nueva señal BTCUSDT puede ejecutarse.
-- El selector conserva solo la mejor oportunidad por símbolo.
-- Existe una restricción SQLite adicional para impedir duplicados por condiciones de carrera.
-- El usuario configura porcentaje de margen por trade y leverage solicitado.
-- El leverage efectivo nunca supera el permitido por Binance para el símbolo.
-- Si el tamaño no cumple mínimos de Binance, la operación se rechaza; no se aumenta el capital automáticamente.
-- SL/TP condicionales se envían desde backend mediante el flujo de Algo Service previsto para USD-M Futures.
+1. Introducir API Key.
+2. Introducir API Secret.
+3. Pulsar `Guardar y conectar`.
+4. Verificar conexión antes de usar TESTNET o REAL.
 
-### Forex / MT5
+Las credenciales se almacenan cifradas en el backend. No se vuelven a mostrar completas al navegador.
 
-- Puede haber múltiples operaciones del mismo par.
-- Cada retest/reentrada usa un `signalFingerprint` distinto y recibe su propio ticket.
-- La misma señal exacta no puede duplicarse.
-- Si la cuenta MT5 es netting, una segunda posición independiente del mismo símbolo se bloquea.
-- Para retests independientes se requiere una cuenta MT5 de tipo hedging.
-- El lotaje puede calcularse como `RISK_TO_SL` o `MARGIN_PERCENT`.
+Reglas Crypto:
 
-## 1. Seguridad primero
+- máximo 10 posiciones;
+- cada posición debe ser una coin diferente;
+- una coin abierta bloquea nuevas entradas de esa misma coin;
+- porcentaje configurado = margen objetivo por trade;
+- leverage solicitado se limita automáticamente al máximo permitido;
+- SL/TP se colocan en Binance;
+- si la protección falla después de abrir, se intenta cierre reduce-only de emergencia;
+- reconciliación periódica recupera PnL, comisiones y funding reales.
 
-Las claves que estuvieron escritas en el frontend deben considerarse comprometidas y revocarse/rotarse.
+## 2. Telegram
 
-Nunca guardar nuevas claves en:
+Desde `Configuración > Integraciones`:
 
-- `App.tsx`
-- `services/*.ts` del frontend
-- `.env` versionado
-- README o screenshots
+1. Introducir Bot Token.
+2. Introducir Chat ID.
+3. Pulsar `Guardar y conectar`.
+4. La aplicación envía un mensaje de prueba.
 
-Usar solo variables de entorno del backend.
+Telegram recibe aperturas, cierres, PnL, win rate y alertas operativas.
 
-Recomendación para Binance:
+## 3. MT5 — conexión individual recomendada
 
-- deshabilitar withdrawals;
-- habilitar únicamente permisos necesarios para Futures;
-- usar restricción de IP cuando el servidor tenga IP fija;
-- claves distintas para pruebas y producción.
+### Requisitos
 
-## 2. Backend
+Usar una PC o VPS Windows con:
+
+- MetaTrader 5 instalado;
+- una cuenta MT5 Demo abierta e iniciada sesión;
+- Python instalado;
+- trading algorítmico habilitado en MT5.
+
+Para poder mantener varios tickets independientes del mismo par, la cuenta debe ser **hedging**. Una cuenta netting no sirve para la lógica de retests múltiples.
+
+### Instalar el bridge
+
+En la misma PC/VPS donde está MT5:
+
+```bat
+cd mt5-bridge
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
+```
+
+Editar `mt5-bridge/.env`:
+
+```env
+MT5_BRIDGE_HOST=127.0.0.1
+MT5_BRIDGE_PORT=8790
+MT5_BRIDGE_TOKEN=pon-un-token-largo-y-aleatorio
+
+# Estos campos son opcionales.
+# Para la prueba individual es preferible dejar MetaTrader ya iniciado sesión.
+MT5_LOGIN=
+MT5_PASSWORD=
+MT5_SERVER=
+MT5_TERMINAL_PATH=
+```
+
+Arrancar la aplicación completa del bridge:
+
+```bat
+uvicorn app:app --host 127.0.0.1 --port 8790
+```
+
+El bridge expone ejecución, cuenta, posiciones, historial y market data M1/M5/M15/H1.
+
+### Si backend y MT5 están en la misma PC
+
+Usar:
+
+```text
+Bridge URL: http://127.0.0.1:8790
+Bridge Token: el mismo MT5_BRIDGE_TOKEN
+```
+
+### Si MT5 está en otro VPS
+
+No exponer el puerto 8790 directamente a Internet. Usar VPN privada/Tailscale o un reverse proxy HTTPS autenticado y restringido por firewall.
+
+### Validación MT5
+
+La prueba de conexión debe confirmar:
+
+- `tradeAllowed = true`;
+- `tradeExpert = true`;
+- `hedging = true` si se quieren múltiples retests del mismo par;
+- balance/equity correctos;
+- servidor y login correctos.
+
+## 4. Backend
 
 ```bash
 cd backend
@@ -62,28 +123,17 @@ npm run typecheck
 npm run dev
 ```
 
-Por defecto escucha en:
+Backend por defecto:
 
 `http://127.0.0.1:8787`
 
-La base SQLite se crea en:
+SQLite:
 
 `backend/data/trading-v34.sqlite`
 
-### Variables principales
+La llave local de cifrado se genera fuera de Git. En producción se debe usar `INTEGRATION_MASTER_KEY` mediante Secret Manager/KMS.
 
-```env
-APP_MODE=PAPER
-CRYPTO_MAX_TRADES=10
-CRYPTO_MARGIN_PCT=1
-CRYPTO_REQUESTED_LEVERAGE=20
-FOREX_MAX_TRADES=20
-FOREX_MAX_ENTRIES_PER_SYMBOL=0
-```
-
-`CRYPTO_MAX_TRADES` nunca puede ser mayor a 10.
-
-## 3. Frontend
+## 5. Frontend
 
 Desde la raíz:
 
@@ -92,123 +142,77 @@ npm install
 npm run dev
 ```
 
-El dashboard consulta por defecto:
+El frontend consulta por defecto:
 
-`http://127.0.0.1:8787/api/state`
+`http://127.0.0.1:8787`
 
-Para usar otra URL:
+## 6. Secuencia correcta de prueba
 
-```env
-VITE_V34_API_BASE=https://tu-backend.example.com
-```
+### Etapa A — PAPER / observación
 
-## 4. MT5 Bridge
+Objetivo: comprobar scanner, ranking y señales sin dinero.
 
-El bridge debe ejecutarse en la misma PC/VPS Windows donde está instalado MetaTrader 5.
+- revisar frecuencia de señales;
+- validar que Crypto nunca repite símbolos;
+- validar retests Forex;
+- revisar SL/TP propuestos;
+- medir backtest rodante y distribución por símbolo;
+- verificar persistencia tras reiniciar navegador/backend.
 
-```bash
-cd mt5-bridge
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env
-python main.py
-```
+### Etapa B — Binance Testnet + MT5 Demo
 
-Endpoint por defecto:
+Esta es la prueba importante de ejecución real sin capital real.
 
-`http://127.0.0.1:8790`
+Verificar durante suficientes operaciones:
 
-### Cuenta recomendada
+- orden realmente abierta por broker;
+- tamaño correcto;
+- leverage correcto;
+- SL y TP colocados;
+- cierre por SL/TP detectado;
+- PnL real recuperado;
+- fees/funding/swap correctos;
+- Telegram de apertura y cierre;
+- reinicio del backend con posiciones abiertas;
+- cierre manual desde Binance/MT5;
+- desconexión/reconexión de red;
+- retests múltiples del mismo par en MT5 hedging.
 
-Primero usar **MT5 Demo** y verificar en `/health` que:
+### Etapa C — Capital real pequeño
 
-```json
-{
-  "account": {
-    "hedging": true
-  }
-}
-```
+Solo después de que Testnet/Demo sea estable.
 
-Con `hedging: true`, EURUSD puede mantener tickets independientes para distintos retests.
+Usar tamaño pequeño y no aumentar capital por unos pocos trades positivos.
 
-## 5. Telegram
+## 7. Cómo decidir si realmente es rentable
 
-Configurar solo en `backend/.env`:
+No usar solo win rate. Evaluar por separado Crypto y Forex:
 
-```env
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...
-```
-
-La app envía eventos de apertura/cierre y alertas operativas.
-
-## 6. Secuencia de pruebas
-
-### Fase A — PAPER
-
-1. `APP_MODE=PAPER`.
-2. Confirmar que el motor inicia apagado.
-3. Inyectar oportunidades de prueba.
-4. Verificar que el selector Crypto nunca devuelve más de 10 símbolos ni repite uno.
-5. Verificar que Forex sí permite varios EURUSD con fingerprints diferentes.
-6. Cerrar/reabrir el navegador y confirmar que historial y settings permanecen.
-7. Reiniciar backend y confirmar persistencia SQLite.
-
-### Fase B — Binance Testnet + MT5 Demo
-
-1. Configurar credenciales nuevas de Binance Testnet.
-2. Mantener MT5 en Demo.
-3. Seleccionar `TESTNET / DEMO` en la UI.
-4. Verificar leverage real confirmado por Binance.
-5. Verificar que SL/TP aparezcan como órdenes condicionales vigentes.
-6. Verificar reconciliación de posiciones.
-7. Probar desconexión de red y reinicio del backend.
-8. Probar varios retests del mismo par Forex en cuenta hedging.
-
-### Fase C — REAL
-
-No habilitar hasta completar pruebas de:
-
-- pérdida diaria máxima;
+- mínimo 100 operaciones cerradas por motor antes de una conclusión preliminar;
+- profit neto después de comisiones, funding y swap;
+- Profit Factor;
+- expectancy por operación;
 - drawdown máximo;
-- cierre/reconciliación tras reinicio;
-- posición cerrada manualmente fuera de la app;
-- SL/TP ejecutado por broker;
-- error parcial (entrada abre y protección falla);
-- Telegram caído;
-- Binance/MT5 caído;
-- emergency stop.
+- average win / average loss;
+- rendimiento por símbolo;
+- rendimiento por estrategia/setup;
+- estabilidad por semana, no solo resultado acumulado;
+- slippage real contra entrada teórica.
 
-## 7. Endpoints actuales
+Como referencia de prueba interna, no como garantía de rentabilidad, buscamos un Profit Factor sostenido mayor a 1 y expectancy neta positiva. El sistema no debe pasar a capital significativo solo por tener un win rate alto.
 
-- `GET /health`
-- `GET /api/state`
-- `PATCH /api/settings`
-- `POST /api/engine/start`
-- `POST /api/engine/pause`
-- `POST /api/emergency-stop`
-- `POST /api/opportunities/ingest`
+## 8. Lo que todavía falta antes de considerarlo listo para dinero real
 
-MT5 bridge:
+1. Terminar la tarjeta visual de conexión MT5 en Configuración usando los endpoints cifrados ya preparados.
+2. Hacer una prueba end-to-end real del bridge con un terminal MT5 Demo.
+3. Hacer una prueba end-to-end con Binance Testnet.
+4. Validar específicamente el endpoint vigente de SL/TP condicional de Binance en Testnet.
+5. Añadir un reporte de rendimiento por día/semana y curva de equity en el dashboard.
+6. Añadir exportación CSV del historial para auditoría.
+7. Añadir control explícito de spread máximo para Forex y slippage observado.
+8. Añadir política configurable del Emergency Stop: solo pausar o cerrar todas las posiciones.
+9. Mantener al menos una fase Demo/Testnet suficientemente amplia antes de REAL.
 
-- `GET /health`
-- `GET /account`
-- `GET /positions`
-- `POST /size`
-- `POST /order`
-- `POST /close`
+## 9. Membresías
 
-## 8. Siguiente bloque técnico
-
-Aún falta completar antes de producción:
-
-1. migrar el scanner/estrategias completamente al backend;
-2. reconciliador periódico Binance;
-3. reconciliador periódico MT5;
-4. detección de cierre y PnL/fees/funding/swap reales;
-5. cierre Telegram automático con win rate actualizado;
-6. límites diarios de riesgo/drawdown;
-7. emergency stop con política de cierre masivo configurable;
-8. pruebas integradas contra Binance Testnet y MT5 Demo.
+Se posponen. Primero se prueba una sola cuenta. La bóveda de integraciones ya usa `workspace_id`, pero el resto de la plataforma seguirá tratándose como instalación individual hasta demostrar estabilidad y rentabilidad.
