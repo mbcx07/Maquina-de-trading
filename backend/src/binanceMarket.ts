@@ -48,9 +48,7 @@ export class BinanceMarketDataClient {
   }
 
   async getTradableUsdtPerpetualSymbols(): Promise<string[]> {
-    if (this.exchangeInfoCache && Date.now() - this.exchangeInfoCache.at < 10 * 60_000) {
-      return [...this.exchangeInfoCache.symbols];
-    }
+    if (this.exchangeInfoCache && Date.now() - this.exchangeInfoCache.at < 10 * 60_000) return [...this.exchangeInfoCache.symbols];
     const data = await this.getJson<{ symbols: any[] }>('/fapi/v1/exchangeInfo');
     const symbols = (data.symbols ?? [])
       .filter((symbol) => symbol.contractType === 'PERPETUAL' && symbol.status === 'TRADING' && symbol.quoteAsset === 'USDT')
@@ -74,25 +72,19 @@ export class BinanceMarketDataClient {
   }
 
   async getKlines(symbol: string, interval: BinanceInterval, limit: number): Promise<Candle[]> {
-    const rows = await this.getJson<any[]>(
-      `/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${Math.max(1, Math.min(1000, limit))}`,
-    );
+    const rows = await this.getJson<any[]>(`/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${Math.max(1, Math.min(1000, limit))}`);
     return mapKlines(rows);
   }
 
   async getMarkPrice(symbol: string): Promise<number> {
-    const row = await this.getJson<{ markPrice?: string | number }>(
-      `/fapi/v1/premiumIndex?symbol=${encodeURIComponent(symbol)}`,
-    );
+    const row = await this.getJson<{ markPrice?: string | number }>(`/fapi/v1/premiumIndex?symbol=${encodeURIComponent(symbol)}`);
     const mark = Number(row.markPrice ?? 0);
     if (!Number.isFinite(mark) || mark <= 0) throw new Error(`BINANCE_MARK_PRICE_INVALID:${symbol}`);
     return mark;
   }
 
   async getMarkPriceKlines(symbol: string, interval: BinanceInterval, limit: number): Promise<Candle[]> {
-    const rows = await this.getJson<any[]>(
-      `/fapi/v1/markPriceKlines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${Math.max(1, Math.min(1000, limit))}`,
-    );
+    const rows = await this.getJson<any[]>(`/fapi/v1/markPriceKlines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${Math.max(1, Math.min(1000, limit))}`);
     return mapKlines(rows);
   }
 
@@ -104,13 +96,7 @@ export class BinanceMarketDataClient {
     return this.getRange('/fapi/v1/markPriceKlines', symbol, interval, startTime, endTime);
   }
 
-  private async getRange(
-    endpoint: '/fapi/v1/klines' | '/fapi/v1/markPriceKlines',
-    symbol: string,
-    interval: BinanceInterval,
-    startTime: number,
-    endTime: number,
-  ): Promise<Candle[]> {
+  private async getRange(endpoint: '/fapi/v1/klines' | '/fapi/v1/markPriceKlines', symbol: string, interval: BinanceInterval, startTime: number, endTime: number): Promise<Candle[]> {
     if (endTime <= startTime) throw new Error('BINANCE_HISTORY_INVALID_RANGE');
     const intervalMs = intervalToMs(interval);
     const output: Candle[] = [];
@@ -119,9 +105,7 @@ export class BinanceMarketDataClient {
     const pageLimit = 1000;
 
     while (cursor <= endTime) {
-      const rows = await this.getJson<any[]>(
-        `${endpoint}?symbol=${encodeURIComponent(symbol)}&interval=${interval}&startTime=${Math.floor(cursor)}&endTime=${Math.floor(endTime)}&limit=${pageLimit}`,
-      );
+      const rows = await this.getJson<any[]>(`${endpoint}?symbol=${encodeURIComponent(symbol)}&interval=${interval}&startTime=${Math.floor(cursor)}&endTime=${Math.floor(endTime)}&limit=${pageLimit}`);
       const batch = mapKlines(rows).filter((candle) => candle.time >= startTime && candle.time <= endTime);
       if (!batch.length) break;
       output.push(...batch);
@@ -131,35 +115,22 @@ export class BinanceMarketDataClient {
       calls++;
       if (calls > 500) throw new Error('BINANCE_HISTORY_PAGINATION_GUARD');
       if (rows.length < pageLimit) break;
-
-      // Historical universe audits are intentionally much slower than live scanning.
-      // This leaves substantial request-weight headroom for reconciliation/execution.
       await sleep(550);
     }
-
     return dedupeCandles(output);
   }
 
-  /**
-   * Decision data for the trading strategy.
-   * M5 is the entry/structure timeframe; M15 is the independent trend filter.
-   * The currently-forming candle is excluded so the signal is based on closed bars.
-   */
+  /** Closed-candle decision window: M5 entry/structure and M15 bias. */
   async getDualKlines(symbol: string): Promise<{ ltf: Candle[]; htf: Candle[] }> {
-    const [ltfRaw, htfRaw] = await Promise.all([
-      this.getKlines(symbol, '5m', 101),
-      this.getKlines(symbol, '15m', 211),
+    const [ltf, htf] = await Promise.all([
+      this.getKlines(symbol, '5m', 320),
+      this.getKlines(symbol, '15m', 220),
     ]);
-    return {
-      ltf: closedCandles(ltfRaw, 5 * 60_000, 100),
-      htf: closedCandles(htfRaw, 15 * 60_000, 210),
-    };
+    return { ltf, htf };
   }
 
   async getDualHistoricalRange(symbol: string, startTime: number, endTime: number): Promise<{ ltf: Candle[]; htf: Candle[] }> {
-    const warmupStart = startTime - 15 * 60_000 * 210;
-    // Sequential on purpose: a full-universe audit must not burst two paginated
-    // historical streams from the same IP at the same time.
+    const warmupStart = startTime - 15 * 60_000 * 220;
     const ltf = await this.getKlinesRange(symbol, '5m', Math.max(0, warmupStart), endTime);
     await sleep(750);
     const htf = await this.getKlinesRange(symbol, '15m', Math.max(0, warmupStart), endTime);
@@ -168,14 +139,18 @@ export class BinanceMarketDataClient {
 }
 
 function mapKlines(rows: any[]): Candle[] {
-  return (Array.isArray(rows) ? rows : []).map((row) => ({
-    time: Number(row[0]),
-    open: Number(row[1]),
-    high: Number(row[2]),
-    low: Number(row[3]),
-    close: Number(row[4]),
-    volume: Number(row[5] ?? 0),
-  })).filter((candle) => Number.isFinite(candle.time) && Number.isFinite(candle.close));
+  const now = Date.now();
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => Number(row[6] ?? 0) <= now)
+    .map((row) => ({
+      time: Number(row[0]),
+      open: Number(row[1]),
+      high: Number(row[2]),
+      low: Number(row[3]),
+      close: Number(row[4]),
+      volume: Number(row[5] ?? 0),
+    }))
+    .filter((candle) => Number.isFinite(candle.time) && Number.isFinite(candle.close));
 }
 
 function intervalToMs(interval: BinanceInterval): number {
@@ -185,19 +160,10 @@ function intervalToMs(interval: BinanceInterval): number {
   return 60 * 60_000;
 }
 
-function closedCandles(candles: Candle[], intervalMs: number, limit: number): Candle[] {
-  const now = Date.now();
-  return candles
-    .filter((candle) => candle.time + intervalMs <= now)
-    .slice(-limit);
-}
-
 function dedupeCandles(candles: Candle[]): Candle[] {
   const map = new Map<number, Candle>();
   for (const candle of candles) map.set(candle.time, candle);
   return [...map.values()].sort((a, b) => a.time - b.time);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+function sleep(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
