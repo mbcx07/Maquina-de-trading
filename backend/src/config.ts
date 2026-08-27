@@ -26,6 +26,8 @@ const envSchema = z.object({
   CRYPTO_MAX_TRADES: z.coerce.number().int().min(1).max(10).default(10),
   CRYPTO_MARGIN_PCT: z.coerce.number().positive().max(100).default(1),
   CRYPTO_REQUESTED_LEVERAGE: z.coerce.number().int().min(1).max(125).default(20),
+  // Kept only for backward-compatible SQLite settings from R7. R8 does NOT use
+  // these values to rewrite V33.5 structural stop/target prices.
   CRYPTO_MIN_STOP_PRICE_PCT: z.coerce.number().positive().max(25).default(1),
   CRYPTO_MIN_TAKE_PROFIT_PRICE_PCT: z.coerce.number().positive().max(50).default(1.5),
   CRYPTO_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
@@ -33,11 +35,11 @@ const envSchema = z.object({
   PAPER_INITIAL_BALANCE: z.coerce.number().positive().default(100),
   PAPER_ROUND_TRIP_COST_PCT: z.coerce.number().min(0).max(10).default(0.12),
 
-  // Four pairs × two time-series requests × 72 cycles/day (20 min) ≈ 576 credits/day.
-  // This leaves useful headroom under the current Twelve Data Basic 800/day allowance.
-  FOREX_SYMBOLS: z.string().default('EURUSD,GBPUSD,USDJPY,EURJPY'),
-  FOREX_SIGNAL_SCAN_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).default(20),
-  FOREX_SIGNALS_PER_CYCLE: z.coerce.number().int().min(1).max(20).default(4),
+  // 14 instruments × 2 time-series requests × 24 hourly cycles ≈ 672 credits/day.
+  // The scanner can raise the effective interval automatically if the list grows.
+  FOREX_SYMBOLS: z.string().default('EURUSD,GBPUSD,USDJPY,EURJPY,AUDUSD,USDCAD,USDCHF,NZDUSD,GBPJPY,AUDJPY,EURGBP,EURAUD,XAUUSD,NAS100'),
+  FOREX_SIGNAL_SCAN_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).default(60),
+  FOREX_SIGNALS_PER_CYCLE: z.coerce.number().int().min(1).max(20).default(6),
   FOREX_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(75),
   FOREX_MIN_WINRATE: z.coerce.number().min(0).max(100).default(70),
 
