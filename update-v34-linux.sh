@@ -3,6 +3,7 @@ set -euo pipefail
 
 BRANCH="feature/v34-dual-market-engine"
 COMPOSE="docker-compose.linux.yml"
+EXPECTED_RELEASE="2026.08.27-R6"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
@@ -49,12 +50,14 @@ if [[ "$BACKEND_OK" -ne 1 ]]; then
 fi
 
 echo "[6/6] Verificando release servido por el frontend..."
-if curl -fsS -H 'Cache-Control: no-cache' "http://127.0.0.1:8080/release.txt?ts=$(date +%s)"; then
-  echo
-else
-  echo "ERROR: release.txt no está disponible. El frontend nuevo no quedó desplegado."
+RELEASE_TEXT="$(curl -fsS -H 'Cache-Control: no-cache' "http://127.0.0.1:8080/release.txt?ts=$(date +%s)" || true)"
+printf '%s\n' "$RELEASE_TEXT"
+if [[ "$RELEASE_TEXT" != *"Release: $EXPECTED_RELEASE"* ]]; then
+  echo "ERROR: el frontend servido NO es $EXPECTED_RELEASE."
+  echo "Revisa contenedores/imágenes Docker; no continúes suponiendo que la UI se actualizó."
   exit 3
 fi
 
 echo
-echo "OK. Abre/recarga http://127.0.0.1:8080 y verifica que release.txt indique 2026.08.27-R5."
+printf 'OK. Release verificada: %s\n' "$EXPECTED_RELEASE"
+echo "En el navegador debes ver: Quantum Dual V34 R6 y la etiqueta fija BUILD R6."
