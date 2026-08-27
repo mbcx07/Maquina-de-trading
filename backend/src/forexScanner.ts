@@ -3,9 +3,19 @@ import { opportunityScore } from './analysis.js';
 import { analyzeStructureStrategyV335, runRollingBacktestV335 } from './analysisV335.js';
 import { TradingDatabase } from './database.js';
 import { ForexDataClient } from './forexData.js';
+import { ForexSignalTracker } from './forexSignalTracker.js';
 import { TradingRepository } from './repositories.js';
 import { TelegramService } from './telegram.js';
 import type { EngineSettings, Opportunity } from './types.js';
+
+const LEGACY_DEFAULTS = ['EURUSD', 'GBPUSD', 'USDJPY', 'EURJPY'];
+const EXPANDED_DEFAULTS = [
+  'EURUSD', 'GBPUSD', 'USDJPY', 'EURJPY',
+  'AUDUSD', 'USDCAD', 'USDCHF', 'NZDUSD',
+  'GBPJPY', 'AUDJPY', 'EURGBP', 'EURAUD',
+  'XAUUSD', 'NAS100',
+];
+const BASIC_DAILY_BUDGET_TARGET = 720; // keep headroom under the 800/day Basic cap
 
 export class ForexMarketScanner {
   private running = false;
@@ -13,6 +23,7 @@ export class ForexMarketScanner {
   private timer: NodeJS.Timeout | null = null;
   private signalZoneActive = new Map<string, boolean>();
   private retestCount = new Map<string, number>();
+  private readonly tracker: ForexSignalTracker;
 
   constructor(
     private readonly database: TradingDatabase,
@@ -20,10 +31,13 @@ export class ForexMarketScanner {
     private readonly repository: TradingRepository,
     private readonly telegram: TelegramService,
     private readonly getSettings: () => EngineSettings,
-  ) {}
+  ) {
+    this.tracker = new ForexSignalTracker(database);
+  }
 
   start(): void {
     this.stopped = false;
+    this.ensureExpandedDefaults();
     void this.loop();
   }
 
@@ -35,27 +49,30 @@ export class ForexMarketScanner {
 
   async runCycle(forceManual = false): Promise<void> {
     if (this.running) return;
+    this.ensureExpandedDefaults();
     const settings = this.getSettings();
     if (!settings.engineEnabled && !forceManual) {
-      this.saveState({ status: 'PAUSED', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
+      this.saveState({ status: 'PAUSED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', performance: this.tracker.summary(20) });
       return;
     }
     if (!settings.forexEnabled) {
-      this.saveState({ status: 'DISABLED', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
+      this.saveState({ status: 'DISABLED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', performance: this.tracker.summary(20) });
       return;
     }
     if (!this.market.hasCredentials()) {
-      this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
+      this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY', performance: this.tracker.summary(20) });
       return;
     }
 
-    // Telegram is delivery only. It must never block Forex analysis or the dashboard.
     const telegramConfigured = this.telegram.isConfigured();
     this.running = true;
     const symbols = [...new Set(settings.forexSymbols.map((symbol) => normalizeDisplaySymbol(symbol)).filter(Boolean))];
     const freshSignals: Opportunity[] = [];
     let errors = 0;
+    let scanned = 0;
+    let rateLimited = false;
     const startedAt = Date.now();
+    const effectiveIntervalMinutes = this.effectiveIntervalMinutes(settings, symbols.length);
 
     try {
       this.saveState({
@@ -63,6 +80,11 @@ export class ForexMarketScanner {
         trigger: forceManual ? 'MANUAL' : 'SCHEDULED',
         telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, total: symbols.length, scanned: 0, signals: 0, errors: 0,
+        configuredIntervalMinutes: settings.forexSignalScanIntervalMinutes,
+        effectiveIntervalMinutes,
+        estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
+        symbols,
+        performance: this.tracker.summary(20),
       });
 
       for (let index = 0; index < symbols.length; index++) {
@@ -71,17 +93,27 @@ export class ForexMarketScanner {
           const signal = await this.scanSymbol(symbol);
           this.clearSymbolError(symbol);
           if (signal) freshSignals.push(signal);
+          scanned++;
         } catch (error) {
           errors++;
+          scanned++;
           this.saveSymbolError(symbol, error);
+          if (isRateLimitError(error)) {
+            rateLimited = true;
+            break;
+          }
         }
 
         this.saveState({
           status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
           trigger: forceManual ? 'MANUAL' : 'SCHEDULED',
           telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
-          startedAt, total: symbols.length, scanned: index + 1, current: symbol,
-          signals: freshSignals.length, errors, usage: this.market.getUsage(),
+          startedAt, total: symbols.length, scanned, current: symbol,
+          signals: freshSignals.length, errors, usage: this.market.getUsage(), symbols,
+          configuredIntervalMinutes: settings.forexSignalScanIntervalMinutes,
+          effectiveIntervalMinutes,
+          estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
+          performance: this.tracker.summary(20),
         });
       }
 
@@ -96,9 +128,9 @@ export class ForexMarketScanner {
       let sent = 0;
       let deliveryErrors = 0;
       for (const signal of qualified) {
-        // Always persist the signal so it appears in the dashboard even if Telegram is absent/down.
         this.repository.saveSignal(signal);
         this.repository.rejectOpportunity(signal.id, 'FOREX_SIGNAL_ONLY_MANUAL_EXECUTION');
+        this.tracker.register(signal);
 
         if (!telegramConfigured || this.wasSent(signal.signalFingerprint)) continue;
 
@@ -114,16 +146,34 @@ export class ForexMarketScanner {
         }
       }
 
+      const status = rateLimited
+        ? 'DATA_LIMIT'
+        : scanned > 0 && errors === scanned
+          ? 'DATA_ERROR'
+          : errors > 0
+            ? 'IDLE_WITH_ERRORS'
+            : 'IDLE';
+      const diagnostic = rateLimited
+        ? 'TWELVE_DATA_RATE_LIMIT_OR_DAILY_QUOTA'
+        : freshSignals.length === 0 && errors === 0
+          ? 'NO_VALID_SETUP_NOW'
+          : undefined;
+
       this.saveState({
-        status: errors === symbols.length && symbols.length > 0 ? 'DATA_ERROR' : 'IDLE',
+        status,
         mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
         trigger: forceManual ? 'MANUAL' : 'SCHEDULED',
         telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
-        startedAt, completedAt: Date.now(), total: symbols.length, scanned: symbols.length,
+        startedAt, completedAt: Date.now(), total: symbols.length, scanned,
         signals: freshSignals.length, qualified: qualified.length, sent, errors, deliveryErrors,
-        diagnostic: freshSignals.length === 0 && errors === 0 ? 'NO_VALID_SETUP_NOW' : undefined,
+        diagnostic,
         usage: this.market.getUsage(),
-        nextScanMinutes: settings.forexSignalScanIntervalMinutes,
+        configuredIntervalMinutes: settings.forexSignalScanIntervalMinutes,
+        effectiveIntervalMinutes,
+        estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
+        nextScanMinutes: effectiveIntervalMinutes,
+        symbols,
+        performance: this.tracker.summary(40),
       });
     } finally {
       this.running = false;
@@ -138,20 +188,28 @@ export class ForexMarketScanner {
       this.saveState({
         status: 'ERROR', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
         error: error instanceof Error ? error.message : String(error), at: Date.now(),
+        performance: this.tracker.summary(20),
       });
       console.error('[V34] forex signal scanner:', error instanceof Error ? error.message : error);
     }
 
     if (!this.stopped) {
-      const delay = Math.max(1, this.getSettings().forexSignalScanIntervalMinutes) * 60_000;
-      this.timer = setTimeout(() => void this.loop(), delay);
+      const settings = this.getSettings();
+      const delayMinutes = this.effectiveIntervalMinutes(settings, settings.forexSymbols.length);
+      this.timer = setTimeout(() => void this.loop(), delayMinutes * 60_000);
       this.timer.unref();
     }
   }
 
   private async scanSymbol(symbol: string): Promise<Opportunity | null> {
-    const { ltf, htf } = await this.market.dualRates(symbol);
-    if (ltf.length < 100 || htf.length < 210) throw new Error(`FOREX_INSUFFICIENT_CANDLES:${symbol}:ltf=${ltf.length}:htf=${htf.length}`);
+    const { ltf, htf, dataSymbol } = await this.market.dualRates(symbol);
+    if (ltf.length < 100 || htf.length < 210) {
+      throw new Error(`FOREX_INSUFFICIENT_CANDLES:${symbol}:${dataSymbol}:ltf=${ltf.length}:htf=${htf.length}`);
+    }
+
+    // Resolve previous virtual Forex signals from these same candles. No extra API
+    // request is needed, so performance statistics do not consume additional credits.
+    this.tracker.updateFromCandles(symbol, ltf);
 
     const signal = analyzeStructureStrategyV335(ltf, htf, symbol);
     if (!signal) {
@@ -167,7 +225,7 @@ export class ForexMarketScanner {
     const score = opportunityScore(signal, backtest, 60);
     const candleTime = ltf.at(-1)?.time ?? Date.now();
     const fingerprint = sha256([
-      'FOREX-SIGNAL', symbol, signal.side, signal.strategy, String(candleTime),
+      'FOREX-SIGNAL', symbol, dataSymbol, signal.side, signal.strategy, String(candleTime),
       roundKey(signal.stopLoss), roundKey(signal.takeProfit),
     ].join('|'));
 
@@ -193,6 +251,7 @@ export class ForexMarketScanner {
       metadata: {
         executionMode: 'SIGNAL_ONLY',
         dataProvider: 'TWELVE_DATA',
+        dataSymbol,
         reason: signal.reason,
         atr: signal.atr,
         backtest,
@@ -201,6 +260,27 @@ export class ForexMarketScanner {
         decisionWindows: { m1: 100, m15: 210 },
       },
     };
+  }
+
+  private ensureExpandedDefaults(): void {
+    const settings = this.getSettings();
+    const current = settings.forexSymbols.map(normalizeDisplaySymbol);
+    if (!sameSet(current, LEGACY_DEFAULTS)) return;
+
+    this.database.saveSettings({
+      ...settings,
+      forexSymbols: EXPANDED_DEFAULTS,
+      // 14 instruments × 2 timeframes × 24 hourly cycles = 672 credits/day.
+      forexSignalScanIntervalMinutes: Math.max(60, settings.forexSignalScanIntervalMinutes),
+      forexSignalsPerCycle: Math.max(6, settings.forexSignalsPerCycle),
+      forexExecutionMode: 'SIGNAL_ONLY',
+    });
+  }
+
+  private effectiveIntervalMinutes(settings: EngineSettings, symbolCount: number): number {
+    const configured = Math.max(1, Number(settings.forexSignalScanIntervalMinutes || 60));
+    const minimumForDailyBudget = Math.ceil(Math.max(1, symbolCount) * 2 * 1440 / BASIC_DAILY_BUDGET_TARGET);
+    return Math.max(configured, minimumForDailyBudget);
   }
 
   private wasSent(fingerprint: string): boolean {
@@ -250,7 +330,23 @@ export class ForexMarketScanner {
 }
 
 function normalizeDisplaySymbol(symbol: string): string {
-  return symbol.trim().toUpperCase().replace('/', '');
+  return symbol.trim().toUpperCase().replace(/\//g, '').replace(/\s+/g, '');
+}
+
+function sameSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const aa = [...a].sort();
+  const bb = [...b].sort();
+  return aa.every((value, index) => value === bb[index]);
+}
+
+function estimateDailyCredits(symbolCount: number, intervalMinutes: number): number {
+  return Math.ceil(Math.max(1, symbolCount) * 2 * (1440 / Math.max(1, intervalMinutes)));
+}
+
+function isRateLimitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('TWELVE_DATA_RATE_LIMIT_OR_DAILY_QUOTA') || message.includes('TWELVE_DATA_429');
 }
 
 function sha256(value: string): string {
