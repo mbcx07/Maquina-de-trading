@@ -32,7 +32,7 @@ export function createIntegrationRouter(
       const body = z.object({ apiKey: z.string().min(8).max(512), apiSecret: z.string().min(8).max(512) }).parse(req.body);
       vault.saveBinance(workspaceId, body);
       const test = await testBinance(vault, workspaceId, getSettings);
-      res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
+      res.status(test.ok ? 200 : 400).json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
     } catch (error) {
       res.status(400).json({ error: message(error) });
     }
@@ -44,7 +44,7 @@ export function createIntegrationRouter(
       const body = z.object({ botToken: z.string().min(10).max(512), chatId: z.string().min(1).max(128) }).parse(req.body);
       vault.saveTelegram(workspaceId, body);
       const test = await testTelegram(vault, workspaceId);
-      res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
+      res.status(test.ok ? 200 : 400).json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
     } catch (error) {
       res.status(400).json({ error: message(error) });
     }
@@ -56,7 +56,7 @@ export function createIntegrationRouter(
       const body = z.object({ apiKey: z.string().min(8).max(512) }).parse(req.body);
       vault.saveTwelveData(workspaceId, body);
       const test = await testTwelveData(vault, workspaceId);
-      res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
+      res.status(test.ok ? 200 : 400).json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
     } catch (error) {
       res.status(400).json({ error: message(error) });
     }
@@ -70,7 +70,7 @@ export function createIntegrationRouter(
       const body = z.object({ bridgeUrl: z.string().url().max(1024), bridgeToken: z.string().min(4).max(512) }).parse(req.body);
       vault.saveMt5(workspaceId, body);
       const test = await testMt5(vault, workspaceId, getSettings);
-      res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
+      res.status(test.ok ? 200 : 400).json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
     } catch (error) {
       res.status(400).json({ error: message(error) });
     }
