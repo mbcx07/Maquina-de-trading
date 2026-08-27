@@ -3,22 +3,27 @@ import { analyzeStructureStrategyV335, runRollingBacktestV335 } from './analysis
 import { BinanceMarketDataClient } from './binanceMarket.js';
 import { TradingDatabase } from './database.js';
 import { OpportunityOrchestrator } from './orchestrator.js';
+import { UniverseQualificationService } from './universeQualification.js';
 import type { EngineSettings, Opportunity } from './types.js';
 
 export class CryptoMarketScanner {
   private running = false;
   private stopped = false;
   private timer: NodeJS.Timeout | null = null;
+  private readonly qualification: UniverseQualificationService;
 
   constructor(
     private readonly database: TradingDatabase,
     private readonly market: BinanceMarketDataClient,
     private readonly orchestrator: OpportunityOrchestrator,
     private readonly getSettings: () => EngineSettings,
-  ) {}
+  ) {
+    this.qualification = new UniverseQualificationService(database, market);
+  }
 
   start(): void {
     this.stopped = false;
+    if (this.qualification.shouldRefresh(7)) this.qualification.runInBackground(14);
     void this.loop();
   }
 
@@ -32,24 +37,34 @@ export class CryptoMarketScanner {
     if (this.running) return;
     if (!this.getSettings().cryptoEnabled) return;
 
-    const audit = this.loadUniverseAudit();
-    if (!audit || audit.status !== 'COMPLETED') {
+    if (this.qualification.shouldRefresh(7)) this.qualification.runInBackground(14);
+    const audit = this.qualification.getState();
+    if (audit.status !== 'COMPLETED') {
       this.saveState({
         status: 'WAITING_UNIVERSE_AUDIT',
         strategy: 'V33.5_ORIGINAL_COMPAT',
-        auditStatus: audit?.status ?? 'NOT_RUN',
-        completedAt: Date.now(),
+        auditStatus: audit.status,
+        startedAt: audit.startedAt,
+        completedAt: audit.completedAt,
+        total: audit.total ?? 0,
+        scanned: audit.completed ?? 0,
+        current: audit.current ?? null,
+        qualifiedUniverse: audit.qualifiedSymbols?.length ?? 0,
+        auditError: audit.error,
+        message: 'No Crypto entry is allowed until the profitability audit completes.',
       });
       return;
     }
 
-    const qualified = new Set((audit.qualifiedSymbols ?? []).map((symbol: string) => symbol.toUpperCase()));
+    const qualified = new Set((audit.qualifiedSymbols ?? []).map((symbol) => symbol.toUpperCase()));
     if (qualified.size === 0) {
       this.saveState({
         status: 'NO_QUALIFIED_SYMBOLS',
         strategy: 'V33.5_ORIGINAL_COMPAT',
         auditCompletedAt: audit.completedAt,
+        qualifiedUniverse: 0,
         completedAt: Date.now(),
+        message: 'The strategy has no currently qualified Binance symbols. No trades will be opened.',
       });
       return;
     }
@@ -73,42 +88,81 @@ export class CryptoMarketScanner {
       const liquidity = liquidityPercentiles(symbols, tickerMap);
 
       this.saveState({
-        status: 'SCANNING', strategy: 'V33.5_ORIGINAL_COMPAT', qualification: 'PROFITABLE_ONLY',
-        startedAt, total: symbols.length, universeTotal: allSymbols.length, liquidUniverse: liquidSymbols.length,
-        qualifiedUniverse: qualified.size, minQuoteVolume24h: 2_000_000, scanned: 0, opportunities: 0, errors: 0,
+        status: 'SCANNING',
+        strategy: 'V33.5_ORIGINAL_COMPAT',
+        qualification: 'PROFITABLE_ONLY',
+        startedAt,
+        total: symbols.length,
+        universeTotal: allSymbols.length,
+        liquidUniverse: liquidSymbols.length,
+        qualifiedUniverse: qualified.size,
+        qualifiedSymbols: [...qualified],
+        minQuoteVolume24h: 2_000_000,
+        scanned: 0,
+        opportunities: 0,
+        errors: 0,
       });
 
       const chunkSize = 4;
       for (let i = 0; i < symbols.length; i += chunkSize) {
         const chunk = symbols.slice(i, i + chunkSize);
-        const results = await Promise.allSettled(chunk.map((symbol) => this.scanSymbol(symbol, liquidity.get(symbol) ?? 0)));
+        const results = await Promise.allSettled(chunk.map((symbol) => this.scanSymbol(
+          symbol,
+          liquidity.get(symbol) ?? 0,
+        )));
+
         for (const result of results) {
           scanned++;
           if (result.status === 'fulfilled' && result.value) opportunities.push(result.value);
           if (result.status === 'rejected') errors++;
         }
+
         this.saveState({
-          status: 'SCANNING', strategy: 'V33.5_ORIGINAL_COMPAT', qualification: 'PROFITABLE_ONLY',
-          startedAt, total: symbols.length, universeTotal: allSymbols.length, liquidUniverse: liquidSymbols.length,
-          qualifiedUniverse: qualified.size, scanned, current: chunk.at(-1) ?? null,
-          opportunities: opportunities.length, errors,
+          status: 'SCANNING',
+          strategy: 'V33.5_ORIGINAL_COMPAT',
+          qualification: 'PROFITABLE_ONLY',
+          startedAt,
+          total: symbols.length,
+          universeTotal: allSymbols.length,
+          liquidUniverse: liquidSymbols.length,
+          qualifiedUniverse: qualified.size,
+          qualifiedSymbols: [...qualified],
+          scanned,
+          current: chunk.at(-1) ?? null,
+          opportunities: opportunities.length,
+          errors,
         });
+
         if (i + chunkSize < symbols.length) await sleep(850);
       }
 
       const result = await this.orchestrator.process(opportunities, true);
       this.saveState({
-        status: 'IDLE', strategy: 'V33.5_ORIGINAL_COMPAT', qualification: 'PROFITABLE_ONLY',
-        startedAt, completedAt: Date.now(), total: symbols.length, universeTotal: allSymbols.length,
-        liquidUniverse: liquidSymbols.length, qualifiedUniverse: qualified.size, scanned,
-        opportunities: opportunities.length, selected: result.selected.crypto.length,
+        status: 'IDLE',
+        strategy: 'V33.5_ORIGINAL_COMPAT',
+        qualification: 'PROFITABLE_ONLY',
+        startedAt,
+        completedAt: Date.now(),
+        total: symbols.length,
+        universeTotal: allSymbols.length,
+        liquidUniverse: liquidSymbols.length,
+        qualifiedUniverse: qualified.size,
+        qualifiedSymbols: [...qualified],
+        scanned,
+        opportunities: opportunities.length,
+        selected: result.selected.crypto.length,
         executed: result.executionResults.filter((item) => item.broker === 'BINANCE' && item.ok === true).length,
         errors,
       });
     } catch (error) {
       this.saveState({
-        status: 'ERROR', strategy: 'V33.5_ORIGINAL_COMPAT', startedAt, completedAt: Date.now(),
-        scanned, opportunities: opportunities.length, errors: errors + 1,
+        status: 'ERROR',
+        strategy: 'V33.5_ORIGINAL_COMPAT',
+        startedAt,
+        completedAt: Date.now(),
+        scanned,
+        opportunities: opportunities.length,
+        errors: errors + 1,
         error: error instanceof Error ? error.message : String(error),
       });
       throw error;
@@ -119,8 +173,12 @@ export class CryptoMarketScanner {
 
   private async loop(): Promise<void> {
     if (this.stopped) return;
-    try { await this.runCycle(); }
-    catch (error) { console.error('[V34] crypto scanner:', error instanceof Error ? error.message : error); }
+    try {
+      await this.runCycle();
+    } catch (error) {
+      console.error('[V34] crypto scanner:', error instanceof Error ? error.message : error);
+    }
+
     if (!this.stopped) {
       this.timer = setTimeout(() => void this.loop(), 15_000);
       this.timer.unref();
@@ -128,7 +186,7 @@ export class CryptoMarketScanner {
   }
 
   private async scanSymbol(symbol: string, liquidityScore: number): Promise<Opportunity | null> {
-    // Individual trend: every symbol receives its own exact 100xM1 + 210xM15 history.
+    // Individual trend: every symbol gets its own exact v33.5 100xM1 + 210xM15 history.
     const { ltf, htf } = await this.market.getDualKlines(symbol);
     if (ltf.length < 100 || htf.length < 210) return null;
 
@@ -156,40 +214,65 @@ export class CryptoMarketScanner {
       id: `OP-BN-${fingerprint.slice(0, 24)}`,
       signalId: `SIG-BN-${fingerprint.slice(0, 24)}`,
       signalFingerprint: fingerprint,
-      broker: 'BINANCE', symbol, side: signal.side, timeframe: '1m/15m', strategy: signal.strategy,
-      confidence: signal.confidence, rollingWinRate, expectancy: backtest.expectancyPct, score,
-      entry: signal.entry, stopLoss: signal.stopLoss, takeProfit: signal.takeProfit, tp2: signal.tp2, tp3: signal.tp3,
+      broker: 'BINANCE',
+      symbol,
+      side: signal.side,
+      timeframe: '1m/15m',
+      strategy: signal.strategy,
+      confidence: signal.confidence,
+      rollingWinRate,
+      expectancy: backtest.expectancyPct,
+      score,
+      entry: signal.entry,
+      stopLoss: signal.stopLoss,
+      takeProfit: signal.takeProfit,
+      tp2: signal.tp2,
+      tp3: signal.tp3,
       createdAt: Date.now(),
       metadata: {
-        reason: signal.reason, atr: signal.atr, backtest, liquidityScore,
+        reason: signal.reason,
+        atr: signal.atr,
+        backtest,
+        liquidityScore,
         rollingWinRateSource: backtest.tradesEvaluated === 0 ? 'SIGNAL_CONFIDENCE_NO_HISTORY' : 'ROLLING_BACKTEST_V335',
-        strategyCompatibility: 'V33.5_ORIGINAL', trendSource: `${symbol}:M15_EMA20_50_200`,
-        decisionWindows: { m1: 100, m15: 210 }, candleTime,
+        strategyCompatibility: 'V33.5_ORIGINAL',
+        trendSource: `${symbol}:M15_EMA20_50_200`,
+        decisionWindows: { m1: 100, m15: 210 },
+        candleTime,
       },
     };
   }
 
-  private loadUniverseAudit(): any | null {
-    const row = this.database.db.prepare(`SELECT value FROM engine_state WHERE key='cryptoUniverseAudit'`).get() as { value: string } | undefined;
-    if (!row) return null;
-    try { return JSON.parse(row.value); } catch { return null; }
-  }
-
   private saveState(value: Record<string, unknown>): void {
     this.database.db.prepare(`
-      INSERT INTO engine_state(key, value, updated_at) VALUES('cryptoScanner', ?, ?)
+      INSERT INTO engine_state(key, value, updated_at)
+      VALUES('cryptoScanner', ?, ?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
     `).run(JSON.stringify(value), Date.now());
   }
 }
 
-function liquidityPercentiles(symbols: string[], tickerMap: Map<string, { quoteVolume: number }>): Map<string, number> {
-  const sorted = symbols.map((symbol) => ({ symbol, volume: Math.max(0, tickerMap.get(symbol)?.quoteVolume ?? 0) })).sort((a, b) => a.volume - b.volume);
+function liquidityPercentiles(
+  symbols: string[],
+  tickerMap: Map<string, { quoteVolume: number }>,
+): Map<string, number> {
+  const sorted = symbols
+    .map((symbol) => ({ symbol, volume: Math.max(0, tickerMap.get(symbol)?.quoteVolume ?? 0) }))
+    .sort((a, b) => a.volume - b.volume);
   const result = new Map<string, number>();
   const denominator = Math.max(1, sorted.length - 1);
   sorted.forEach((item, index) => result.set(item.symbol, index / denominator * 100));
   return result;
 }
-function sha256(value: string): string { return crypto.createHash('sha256').update(value).digest('hex'); }
-function roundKey(value: number): string { return Number(value.toPrecision(10)).toString(); }
-function sleep(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+function sha256(value: string): string {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function roundKey(value: number): string {
+  return Number(value.toPrecision(10)).toString();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
