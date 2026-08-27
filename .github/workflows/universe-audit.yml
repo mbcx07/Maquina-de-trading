@@ -1,0 +1,32 @@
+name: V33.5 Binance Universe Audit
+
+on:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - '.github/workflows/universe-audit.yml'
+      - 'backend/src/universeAuditCore.ts'
+      - 'backend/src/universeAuditCli.ts'
+      - 'backend/src/analysisV335.ts'
+      - 'backend/src/binanceMarket.ts'
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm install
+      - name: Audit all eligible Binance USD-M perpetuals
+        working-directory: backend
+        env:
+          AUDIT_DAYS: '14'
+          AUDIT_STEP_MINUTES: '5'
+          AUDIT_COST_PCT: '0.12'
+        run: npx tsx src/universeAuditCli.ts
