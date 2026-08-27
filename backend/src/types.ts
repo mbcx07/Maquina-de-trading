@@ -95,14 +95,20 @@ export interface EngineSettings {
   cryptoMinSignalConfidence: number;
   cryptoMinRollingWinRate: number;
 
+  // Forex is signal-only in the Linux individual edition. The legacy MT5 sizing
+  // fields remain for DB/backward compatibility but are not used for execution.
   forexEnabled: boolean;
+  forexExecutionMode: 'SIGNAL_ONLY';
   forexSymbols: string[];
+  forexSignalScanIntervalMinutes: number;
+  forexSignalsPerCycle: number;
+  forexMinSignalConfidence: number;
+  forexMinRollingWinRate: number;
+
   maxConcurrentForexTrades: number;
   forexMaxEntriesPerSymbol: number;
   forexRiskMode: 'MARGIN_PERCENT' | 'RISK_TO_SL';
   forexPctPerTrade: number;
-  forexMinSignalConfidence: number;
-  forexMinRollingWinRate: number;
   forexMagicNumber: number;
   forexMaxDeviationPoints: number;
   forexMaxSpreadPoints: number;
