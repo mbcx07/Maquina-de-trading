@@ -25,7 +25,10 @@ export class OpportunityOrchestrator {
     for (const opportunity of opportunities) this.repository.saveSignal(opportunity);
 
     const settings = this.getSettings();
-    const activeTrades = this.database.getActiveTrades();
+    const allActiveTrades = this.database.getActiveTrades();
+    const activeTrades = allActiveTrades.filter((trade) =>
+      trade.broker !== 'BINANCE' || (trade.executionMode ?? 'REAL') === settings.appMode,
+    );
     const context = {
       maxCryptoTrades: Math.min(10, settings.maxConcurrentCryptoTrades),
       maxForexTrades: settings.maxConcurrentForexTrades,
