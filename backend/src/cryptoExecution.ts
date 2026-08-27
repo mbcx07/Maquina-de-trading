@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { BinanceUsdmClient } from './binance.js';
 import { TradingDatabase } from './database.js';
+import { normalizeFuturesExitLevels } from './futuresExitProfile.js';
 import { calculateMetrics } from './metrics.js';
 import { TradingRepository } from './repositories.js';
 import { calculateCryptoSizing, normalizeBinanceOrderSize } from './risk.js';
@@ -54,6 +55,21 @@ export class CryptoExecutionService {
     const maxAllowedLeverage = settings.appMode === 'PAPER'
       ? settings.cryptoRequestedLeverage
       : await this.binance.getMaxAllowedLeverage(opportunity.symbol);
+    const requestedEffectiveLeverage = Math.max(1, Math.min(settings.cryptoRequestedLeverage, maxAllowedLeverage));
+
+    // Normalize in UNDERLYING PRICE space before sizing. Leverage amplifies PnL on
+    // margin; it must not divide the SL/TP trigger distances.
+    const preTradeExits = normalizeFuturesExitLevels({
+      side: opportunity.side,
+      entry: opportunity.entry,
+      stopLoss: opportunity.stopLoss,
+      takeProfit: opportunity.takeProfit,
+      tp2: opportunity.tp2,
+      tp3: opportunity.tp3,
+      minStopPricePct: settings.cryptoMinStopPricePct,
+      minTakeProfitPricePct: settings.cryptoMinTakeProfitPricePct,
+      leverage: requestedEffectiveLeverage,
+    });
 
     const sizing = calculateCryptoSizing({
       futuresBalance,
@@ -61,7 +77,7 @@ export class CryptoExecutionService {
       requestedLeverage: settings.cryptoRequestedLeverage,
       maxAllowedLeverage,
       entryPrice: opportunity.entry,
-      stopLoss: opportunity.stopLoss,
+      stopLoss: preTradeExits.stopLoss,
       maxLossPctPerTrade: settings.cryptoMaxLossPctPerTrade,
     });
 
@@ -98,10 +114,10 @@ export class CryptoExecutionService {
       confidence: opportunity.confidence,
       rollingWinRate: opportunity.rollingWinRate,
       entryPrice: opportunity.entry,
-      stopLoss: opportunity.stopLoss,
-      takeProfit: opportunity.takeProfit,
-      tp2: opportunity.tp2,
-      tp3: opportunity.tp3,
+      stopLoss: preTradeExits.stopLoss,
+      takeProfit: preTradeExits.takeProfit,
+      tp2: preTradeExits.tp2,
+      tp3: preTradeExits.tp3,
       leverage: sizing.effectiveLeverage,
       marginUsed: marginRequired,
       notional: normalized.notional,
@@ -119,6 +135,7 @@ export class CryptoExecutionService {
         score: opportunity.score,
         executionMode: settings.appMode,
         risk: sizing,
+        futuresExitProfileAtSignal: preTradeExits,
         exposure: {
           activeAllocatedMargin,
           marginRequired,
@@ -141,13 +158,38 @@ export class CryptoExecutionService {
       const orderId = String(order.orderId ?? order.clientOrderId ?? order.paper ?? `ORDER-${Date.now()}`);
       const fillPrice = Number(order.avgPrice || order.price || opportunity.entry) || opportunity.entry;
 
+      // Re-check the distance from the ACTUAL market fill. This prevents an entry
+      // that moved between scan and fill from inheriting a TP/SL only a few ticks away.
+      const fillExits = normalizeFuturesExitLevels({
+        side: opportunity.side,
+        entry: fillPrice,
+        stopLoss: preTradeExits.stopLoss,
+        takeProfit: preTradeExits.takeProfit,
+        tp2: preTradeExits.tp2,
+        tp3: preTradeExits.tp3,
+        minStopPricePct: settings.cryptoMinStopPricePct,
+        minTakeProfitPricePct: settings.cryptoMinTakeProfitPricePct,
+        leverage,
+      });
+
       this.repository.patchTrade(id, {
         brokerOrderId: orderId,
         leverage,
         entryPrice: fillPrice,
+        stopLoss: fillExits.stopLoss,
+        takeProfit: fillExits.takeProfit,
+        tp2: fillExits.tp2,
+        tp3: fillExits.tp3,
         openTime: Date.now(),
       });
-      this.database.addTradeEvent(id, 'ENTRY_FILLED', { brokerOrderId: orderId, quantity, leverage, fillPrice, executionMode: settings.appMode });
+      this.database.addTradeEvent(id, 'ENTRY_FILLED', {
+        brokerOrderId: orderId,
+        quantity,
+        leverage,
+        fillPrice,
+        executionMode: settings.appMode,
+        futuresExitProfile: fillExits,
+      });
 
       const exitSide: TradeSide = opportunity.side === 'BUY' ? 'SELL' : 'BUY';
       const stopClientId = clientAlgoId('SL', id);
@@ -158,14 +200,14 @@ export class CryptoExecutionService {
           opportunity.symbol,
           exitSide,
           'STOP_MARKET',
-          opportunity.stopLoss,
+          fillExits.stopLoss,
           stopClientId,
         ),
         this.binance.createCloseAllConditional(
           opportunity.symbol,
           exitSide,
           'TAKE_PROFIT_MARKET',
-          opportunity.takeProfit,
+          fillExits.takeProfit,
           tpClientId,
         ),
       ]);
@@ -193,8 +235,17 @@ export class CryptoExecutionService {
         state: 'OPEN',
         leverage,
         entryPrice: fillPrice,
+        stopLoss: fillExits.stopLoss,
+        takeProfit: fillExits.takeProfit,
+        tp2: fillExits.tp2,
+        tp3: fillExits.tp3,
         brokerOrderId: orderId,
         openTime,
+        metadata: {
+          ...(reserved.metadata ?? {}),
+          futuresExitProfileAtSignal: preTradeExits,
+          futuresExitProfileAtFill: fillExits,
+        },
       });
       this.database.addTradeEvent(id, 'TRADE_OPENED', {
         brokerOrderId: orderId,
@@ -203,6 +254,12 @@ export class CryptoExecutionService {
         stopClientId,
         tpClientId,
         executionMode: settings.appMode,
+        stopLoss: fillExits.stopLoss,
+        takeProfit: fillExits.takeProfit,
+        stopPricePct: fillExits.stopPricePct,
+        tp1PricePct: fillExits.tp1PricePct,
+        stopMarginRoiPct: fillExits.stopMarginRoiPct,
+        tp1MarginRoiPct: fillExits.tp1MarginRoiPct,
       });
 
       const opened = this.database.getActiveTrades('BINANCE').find((trade) => trade.id === id);
@@ -223,8 +280,6 @@ export class CryptoExecutionService {
           closeTime: Date.now(),
         });
       } else if (current?.state !== 'SYNC_REQUIRED') {
-        // An entry did reach the exchange. Never call it REJECTED because that could
-        // hide a live position. Force reconciliation until the exchange proves it closed.
         this.repository.patchTrade(id, { state: 'SYNC_REQUIRED', closeReason: 'ERROR' });
       }
       this.database.addTradeEvent(id, 'TRADE_OPEN_FAILED', {
