@@ -4,9 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "prepare:r9": "node scripts/prepare-r9.mjs",
-    "dev": "npm run prepare:r9 && vite",
-    "build": "npm run prepare:r9 && vite build",
+    "prepare:r10": "node scripts/prepare-r10.mjs",
+    "dev": "npm run prepare:r10 && vite",
+    "build": "npm run prepare:r10 && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
