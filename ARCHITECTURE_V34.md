@@ -9,6 +9,24 @@ Convertir la aplicación actual en una plataforma persistente de trading automá
 
 La interfaz web será únicamente panel de control, monitorización, configuración y reportes. Las API keys, firmas y ejecución de órdenes vivirán en backend.
 
+## Regla fundamental de simultaneidad
+
+### Binance Futures
+
+- Máximo configurable de posiciones simultáneas, default `10`.
+- **Nunca se permite repetir símbolo mientras exista una posición abierta en ese símbolo.**
+- Si `BTCUSDT` está abierto, cualquier nueva oportunidad, retest o señal adicional de `BTCUSDT` se registra, pero NO se ejecuta hasta que la posición anterior quede cerrada y reconciliada.
+- Con `maxConcurrentCryptoTrades = 10`, las diez posiciones deben corresponder a diez símbolos diferentes.
+- La unicidad se valida contra la base de datos y contra las posiciones reales de Binance antes de enviar una orden.
+
+### Forex / MT5
+
+- Sí se permiten múltiples operaciones del mismo símbolo.
+- Cada retest/reentrada se considera un trade independiente con su propio ticket, entry, SL, TP, lotaje, estrategia y señal origen.
+- Ejemplo válido: tres posiciones EURUSD abiertas a distintos precios por tres retests válidos.
+- El límite se aplica al número total de tickets abiertos, no al número de símbolos únicos.
+- La posibilidad real de mantener posiciones independientes del mismo símbolo depende del modo de cuenta MT5; para esta plataforma se recomienda/valida cuenta **hedging**. En netting, el broker puede consolidar posiciones por símbolo y el reconciliador debe detectarlo.
+
 ## 1. Configuración de riesgo y ejecución
 
 ### Crypto
@@ -39,6 +57,14 @@ El motor debe consultar el máximo de apalancamiento válido para el símbolo y 
 
 Nunca debe aumentar el porcentaje de margen configurado para alcanzar el mínimo de una moneda. Si el tamaño no cumple filtros `LOT_SIZE`, `MARKET_LOT_SIZE`, `MIN_NOTIONAL`/notional aplicable, se omite la operación y se registra la razón.
 
+El margen se interpreta como asignación de capital:
+
+`marginTarget = futuresBalance * (marginPctPerTrade / 100)`
+
+`notionalTarget = marginTarget * effectiveLeverage`
+
+Debe existir además un límite de pérdida calculada al SL. Si el SL implicara una pérdida superior a `maxLossPctPerTrade`, el motor reduce el nocional sin aumentar el margen configurado. Si la reducción vuelve inválido el mínimo del símbolo, se rechaza el trade.
+
 ### Forex
 
 Parámetros configurables:
@@ -48,9 +74,12 @@ Parámetros configurables:
 - `riskMode`: `MARGIN_PERCENT` o `RISK_TO_SL`
 - porcentaje por operación
 - lotaje mínimo/máximo permitido
+- `maxEntriesPerSymbol` opcional; `0` significa sin límite específico, sujeto al máximo global
 - símbolos habilitados
 - magic number del sistema
 - desviación/slippage máxima
+
+Cada nueva reentrada debe pasar de nuevo el análisis y generar un `signalId` distinto; no se duplica una orden por el simple hecho de que exista la tendencia previa.
 
 ## 2. Ranking y selección de oportunidades
 
@@ -79,7 +108,25 @@ Score sugerido:
 - relación riesgo/beneficio
 - penalización por correlación/exposición repetida
 
-La UI debe mostrar al menos Top 10 y permitir escoger `maxConcurrentCryptoTrades`.
+### Selector Crypto
+
+Antes de elegir Top-N:
+
+- excluir símbolos ya abiertos en Binance;
+- excluir símbolos marcados `OPENING`, `OPEN`, `CLOSING` o `SYNC_REQUIRED` localmente;
+- deduplicar oportunidades por símbolo y conservar únicamente la de mayor score;
+- tomar las mejores oportunidades hasta llenar los slots disponibles.
+
+Por tanto, `Top 10 ejecutables` significa **10 monedas distintas**.
+
+### Selector Forex
+
+- no deduplicar por símbolo;
+- deduplicar únicamente por `signalFingerprint` para evitar ejecutar dos veces exactamente la misma señal;
+- permitir varios tickets de un mismo par cuando correspondan a retests/reentradas distintas;
+- aplicar `maxEntriesPerSymbol` solo si el usuario lo configura.
+
+La UI debe mostrar Top 10 Crypto y una cola Forex independiente.
 
 ## 3. Gestión de posiciones
 
@@ -106,7 +153,9 @@ Cada posición debe guardar:
 - openTime
 - closeTime
 - closeReason: TP, SL, MANUAL, LIQUIDATION, EXTERNAL, ERROR
-- brokerOrderId / ticket
+- brokerOrderId / MT5 ticket
+- `signalId`
+- `signalFingerprint`
 - raw signal metadata
 
 Estados:
@@ -133,6 +182,11 @@ Persistir en base de datos:
 - engine_state
 
 Para primera versión puede utilizarse SQLite en backend. Para despliegue multiusuario o cloud, PostgreSQL.
+
+Restricciones de datos:
+
+- Crypto: índice/validación lógica que impida más de un trade activo por símbolo.
+- Forex: NO crear restricción única por símbolo; el ticket de MT5 es la identidad operativa.
 
 Al recargar la web:
 
@@ -168,6 +222,9 @@ Métricas mínimas:
 - fees/commission
 - funding/swap
 - rendimiento diario/semanal/mensual
+- win rate por símbolo
+- win rate por estrategia
+- win rate por timeframe
 
 ## 6. Telegram
 
@@ -186,6 +243,8 @@ Alertas configurables:
 - confidence
 - rolling WR
 - estrategia
+- slot utilizado (`Crypto 4/10`, por ejemplo)
+- para Forex: número de entrada del mismo símbolo cuando aplique
 
 ### Cierre
 
@@ -214,6 +273,8 @@ Servicios sugeridos:
 
 - `api-server`
 - `signal-engine`
+- `opportunity-selector`
+- `risk-engine`
 - `crypto-execution-service`
 - `mt5-bridge`
 - `position-reconciler`
@@ -223,7 +284,33 @@ Servicios sugeridos:
 
 La web NO debe firmar órdenes ni conocer API secrets.
 
-## 8. Seguridad
+## 8. Binance V34
+
+- USDⓈ-M Futures.
+- Scanner de contratos `PERPETUAL`, `TRADING`, quote `USDT`.
+- Validar filtros de `exchangeInfo`, incluidos precio, cantidad y notional.
+- Cambiar leverage por símbolo antes de ejecutar y aceptar el leverage efectivo confirmado por Binance.
+- Abrir orden principal a mercado o con el tipo que defina posteriormente la estrategia.
+- SL/TP condicionales deben implementarse con el mecanismo vigente de Binance; no copiar el antiguo flujo frontend sin validarlo contra la API actual.
+- Reconciliar posiciones y órdenes del exchange después de cada apertura/cierre y periódicamente.
+- Si Binance muestra una posición en un símbolo, ese símbolo queda bloqueado para nuevas entradas Crypto.
+
+## 9. MT5 V34
+
+El bridge debe poder:
+
+- consultar `account_info`;
+- obtener símbolos/ticks/barras;
+- validar lotaje y margen;
+- ejecutar con `order_check` + `order_send`;
+- incluir `sl`, `tp`, `magic`, `comment` y desviación;
+- consultar `positions_get`;
+- consultar historial de órdenes/deals;
+- reconciliar por ticket.
+
+En Forex se aceptan varios tickets del mismo símbolo cuando el entorno MT5 esté en hedging.
+
+## 10. Seguridad
 
 Las credenciales actualmente embebidas en `services/binance.ts` deben revocarse y rotarse inmediatamente.
 
@@ -236,8 +323,10 @@ Nueva política:
 - API restringida al trading necesario
 - IP whitelist si la infraestructura lo permite
 - claves independientes para testnet y producción
+- Telegram token solo en backend
+- credenciales MT5 solo en el bridge/host seguro
 
-## 9. UI V34
+## 11. UI V34
 
 Dashboard de dos columnas funcionales:
 
@@ -245,7 +334,8 @@ Dashboard de dos columnas funcionales:
 
 - balance Binance Futures
 - slots usados / máximos
-- Top 10 oportunidades
+- indicador `10 símbolos únicos`
+- Top 10 oportunidades únicas
 - posiciones abiertas
 - historial
 - métricas
@@ -253,8 +343,9 @@ Dashboard de dos columnas funcionales:
 ### Forex
 
 - balance/equity MT5
-- slots usados / máximos
-- mejores pares
+- tickets usados / máximos
+- mejores setups
+- agrupación visual opcional por par, conservando cada ticket individual
 - posiciones abiertas
 - historial
 - métricas
@@ -269,7 +360,7 @@ Cabecera global:
 - estado Telegram
 - DB SYNC
 
-## 10. Reglas de seguridad operativa
+## 12. Reglas de seguridad operativa
 
 Antes de habilitar REAL:
 
@@ -283,16 +374,19 @@ Antes de habilitar REAL:
 8. Límite de drawdown total.
 9. Emergency stop.
 10. Nunca abrir más posiciones que el máximo configurado.
+11. Nunca repetir símbolo Crypto mientras esté abierto.
+12. Nunca duplicar el mismo `signalFingerprint` en Forex, aunque sí se permitan retests distintos del mismo par.
 
-## 11. Prioridad de implementación
+## 13. Prioridad de implementación
 
 1. Eliminar ejecución y secretos del frontend.
 2. Crear backend + DB persistente.
-3. Migrar scanner de Binance a backend.
-4. Crear ranking Top-N.
-5. Implementar paper trading persistente.
-6. Telegram.
-7. Binance testnet.
-8. Binance real.
-9. MT5 demo bridge.
-10. MT5 real.
+3. Implementar reglas de selección Crypto/Forex.
+4. Migrar scanner de Binance a backend.
+5. Crear ranking Top-N.
+6. Implementar paper trading persistente.
+7. Telegram.
+8. Binance testnet.
+9. Binance real.
+10. MT5 demo bridge.
+11. MT5 real.
