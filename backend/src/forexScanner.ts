@@ -48,11 +48,9 @@ export class ForexMarketScanner {
       this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
       return;
     }
-    if (!this.telegram.isConfigured()) {
-      this.saveState({ status: 'WAITING_TELEGRAM', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
-      return;
-    }
 
+    // Telegram is delivery only. It must never block Forex analysis or the dashboard.
+    const telegramConfigured = this.telegram.isConfigured();
     this.running = true;
     const symbols = [...new Set(settings.forexSymbols.map((symbol) => normalizeDisplaySymbol(symbol)).filter(Boolean))];
     const freshSignals: Opportunity[] = [];
@@ -62,6 +60,7 @@ export class ForexMarketScanner {
     try {
       this.saveState({
         status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+        telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, total: symbols.length, scanned: 0, signals: 0, errors: 0,
       });
 
@@ -78,6 +77,7 @@ export class ForexMarketScanner {
 
         this.saveState({
           status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+          telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
           startedAt, total: symbols.length, scanned: index + 1, current: symbol,
           signals: freshSignals.length, errors, usage: this.market.getUsage(),
         });
@@ -92,10 +92,13 @@ export class ForexMarketScanner {
         .slice(0, settings.forexSignalsPerCycle);
 
       let sent = 0;
+      let deliveryErrors = 0;
       for (const signal of qualified) {
+        // Always persist the signal so it appears in the dashboard even if Telegram is absent/down.
         this.repository.saveSignal(signal);
         this.repository.rejectOpportunity(signal.id, 'FOREX_SIGNAL_ONLY_MANUAL_EXECUTION');
-        if (this.wasSent(signal.signalFingerprint)) continue;
+
+        if (!telegramConfigured || this.wasSent(signal.signalFingerprint)) continue;
 
         const retest = (this.retestCount.get(signal.symbol) ?? 0) + 1;
         this.retestCount.set(signal.symbol, retest);
@@ -104,6 +107,7 @@ export class ForexMarketScanner {
           this.recordTelegramSignal(signal, 'SENT');
           sent++;
         } catch (error) {
+          deliveryErrors++;
           this.recordTelegramSignal(signal, 'ERROR', error instanceof Error ? error.message : String(error));
         }
       }
@@ -111,8 +115,9 @@ export class ForexMarketScanner {
       this.saveState({
         status: errors === symbols.length && symbols.length > 0 ? 'DATA_ERROR' : 'IDLE',
         mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA',
+        telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, completedAt: Date.now(), total: symbols.length, scanned: symbols.length,
-        signals: freshSignals.length, qualified: qualified.length, sent, errors,
+        signals: freshSignals.length, qualified: qualified.length, sent, errors, deliveryErrors,
         diagnostic: freshSignals.length === 0 && errors === 0 ? 'NO_VALID_SETUP_NOW' : undefined,
         usage: this.market.getUsage(),
         nextScanMinutes: settings.forexSignalScanIntervalMinutes,
@@ -143,7 +148,7 @@ export class ForexMarketScanner {
 
   private async scanSymbol(symbol: string): Promise<Opportunity | null> {
     const { ltf, htf } = await this.market.dualRates(symbol);
-    if (ltf.length < 80 || htf.length < 200) throw new Error(`FOREX_INSUFFICIENT_CANDLES:${symbol}:ltf=${ltf.length}:htf=${htf.length}`);
+    if (ltf.length < 100 || htf.length < 210) throw new Error(`FOREX_INSUFFICIENT_CANDLES:${symbol}:ltf=${ltf.length}:htf=${htf.length}`);
 
     const signal = analyzeStructureStrategyV335(ltf, htf, symbol);
     if (!signal) {
@@ -190,6 +195,7 @@ export class ForexMarketScanner {
         backtest,
         rollingWinRateSource: backtest.tradesEvaluated === 0 ? 'SIGNAL_CONFIDENCE_NO_BACKTEST_TRADES' : 'ROLLING_BACKTEST',
         candleTime,
+        decisionWindows: { m1: 100, m15: 210 },
       },
     };
   }
