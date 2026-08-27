@@ -1,6 +1,5 @@
 import { CryptoExecutionService } from './cryptoExecution.js';
 import { TradingDatabase } from './database.js';
-import { ForexExecutionService } from './forexExecution.js';
 import { TradingRepository } from './repositories.js';
 import { selectCryptoOpportunities, selectForexOpportunities } from './selection.js';
 import type { EngineSettings, Opportunity } from './types.js';
@@ -19,7 +18,6 @@ export class OpportunityOrchestrator {
     private readonly database: TradingDatabase,
     private readonly repository: TradingRepository,
     private readonly cryptoExecution: CryptoExecutionService,
-    private readonly forexExecution: ForexExecutionService,
     private readonly getSettings: () => EngineSettings,
   ) {}
 
@@ -64,20 +62,18 @@ export class OpportunityOrchestrator {
           });
         }
       }
+    }
 
-      for (const opportunity of selectedForex) {
-        try {
-          const trade = await this.forexExecution.execute(opportunity);
-          executionResults.push({ opportunityId: opportunity.id, broker: 'MT5', ok: true, tradeId: trade.id });
-        } catch (error) {
-          executionResults.push({
-            opportunityId: opportunity.id,
-            broker: 'MT5',
-            ok: false,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
+    // Hard product rule for the Linux individual edition: Forex can be ranked and
+    // surfaced as a signal, but this orchestrator never creates an MT5/Forex trade.
+    for (const opportunity of selectedForex) {
+      executionResults.push({
+        opportunityId: opportunity.id,
+        broker: 'MT5',
+        ok: true,
+        signalOnly: true,
+        executed: false,
+      });
     }
 
     return {
