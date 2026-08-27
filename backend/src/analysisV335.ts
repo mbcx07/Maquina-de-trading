@@ -1,5 +1,9 @@
 import type { Candle, AnalysisSignal, RollingBacktestResult } from './analysis.js';
 
+const ENTRY_TIMEFRAME_MINUTES = 5;
+const ROLLING_HOLD_MINUTES = 45;
+const ROLLING_MAX_HOLD_BARS = Math.max(1, Math.ceil(ROLLING_HOLD_MINUTES / ENTRY_TIMEFRAME_MINUTES));
+
 const sma = (values: number[], period: number): number =>
   values.slice(-period).reduce((a, b) => a + b, 0) / period;
 
@@ -25,7 +29,6 @@ const rsi = (closes: number[], period = 14): number => {
   return 100 - 100 / (1 + rs);
 };
 
-// Intentionally matches the v33.5 ATR implementation used by the original app.
 const atr = (candles: Candle[], period = 14): number => {
   const values = candles.slice(-period).map((candle, index, slice) => {
     if (index === 0) return candle.high - candle.low;
@@ -60,8 +63,8 @@ const swings = (candles: Candle[], lookback = 10): { high: number; low: number }
 };
 
 /**
- * Direct backend port of the original QuantumSniper v33.5 strategy.
- * Entry logic is deliberately kept separate from V34 ranking/execution plumbing.
+ * V33.5 con marco de decisión corregido para el producto actual:
+ * M5 = entrada/estructura y M15 = filtro de tendencia.
  */
 export function analyzeStructureStrategyV335(
   ltfCandles: Candle[],
@@ -82,7 +85,6 @@ export function analyzeStructureStrategyV335(
   if (!uptrend && !downtrend) return null;
   const trend: 'LONG' | 'SHORT' = uptrend ? 'LONG' : 'SHORT';
 
-  // Exact v33.5 anti-chop rule.
   let crossFound = false;
   for (let i = htfCloses.length - 12; i < htfCloses.length - 1; i++) {
     const prior20 = ema(htfCloses.slice(0, i), 20);
@@ -156,15 +158,13 @@ export function analyzeStructureStrategyV335(
     reason: `SNIPER_WR80_CONF${confluence}`,
     confidence,
     atr: currentAtr,
-    strategy: 'EXPERT_CONFLUENCE_V335',
+    strategy: 'EXPERT_CONFLUENCE_V335_M5_M15',
   };
 }
 
 /**
- * v33.5 rolling window and admission semantics.
- * Safety improvement: when TP and SL occur inside the same 1m candle, SL wins because
- * candle OHLC cannot prove that TP happened first. This avoids the optimistic bias in
- * the browser-era backtester while preserving all other v33.5 rules.
+ * Rolling filter aligned to M5/M15. The evaluation horizon remains 45 real minutes,
+ * therefore 9 M5 candles. If SL and TP occur in the same decision candle, SL wins.
  */
 export function runRollingBacktestV335(
   symbol: string,
@@ -184,7 +184,8 @@ export function runRollingBacktestV335(
   }
 
   const lookback = Math.min(length - 52, 160);
-  for (let i = length - 10; i > length - lookback; i -= 2) {
+  // Evaluate every closed M5 bar; skipping every other bar would hide valid setups.
+  for (let i = length - 10; i > length - lookback; i--) {
     const ltfSlice = allCandles.slice(0, i + 1);
     let htfSlice: Candle[];
     if (htfCandles && htfCandles.length >= 50) {
@@ -200,7 +201,8 @@ export function runRollingBacktestV335(
 
     totalTrades++;
     let pnlPct = 0;
-    for (let j = i + 1; j < Math.min(i + 45, length); j++) {
+    const lastExclusive = Math.min(i + 1 + ROLLING_MAX_HOLD_BARS, length);
+    for (let j = i + 1; j < lastExclusive; j++) {
       const next = allCandles[j];
       if (signal.side === 'BUY') {
         const hitTp = next.high >= signal.takeProfit;
