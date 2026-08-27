@@ -46,10 +46,41 @@ export class ForexExecutionService {
 
     let lotSize = Number(opportunity.metadata?.lotSize ?? 0.01);
     let hedging = true;
+    let spreadPoints: number | undefined;
 
     if (settings.appMode !== 'PAPER') {
-      const account = await this.mt5.account();
+      const [account, snapshot] = await Promise.all([
+        this.mt5.account(),
+        this.mt5.marketSnapshot(symbol),
+      ]);
       hedging = account.hedging;
+      spreadPoints = snapshot.spreadPoints;
+
+      if (
+        settings.forexMaxSpreadPoints > 0 &&
+        snapshot.spreadPoints > settings.forexMaxSpreadPoints
+      ) {
+        this.repository.rejectOpportunity(opportunity.id, 'FOREX_SPREAD_TOO_WIDE');
+        this.database.db.prepare(`
+          INSERT INTO engine_state(key, value, updated_at)
+          VALUES(?, ?, ?)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+        `).run(
+          `spreadReject:${symbol}`,
+          JSON.stringify({
+            symbol,
+            spreadPoints: snapshot.spreadPoints,
+            maxSpreadPoints: settings.forexMaxSpreadPoints,
+            bid: snapshot.bid,
+            ask: snapshot.ask,
+            at: Date.now(),
+          }),
+          Date.now(),
+        );
+        throw new Error(
+          `FOREX_SPREAD_TOO_WIDE:${symbol}:${snapshot.spreadPoints.toFixed(1)}>${settings.forexMaxSpreadPoints}`,
+        );
+      }
 
       if (sameSymbol.length > 0 && !hedging) {
         this.repository.rejectOpportunity(opportunity.id, 'MT5_NETTING_BLOCKS_REENTRY');
@@ -96,10 +127,11 @@ export class ForexExecutionService {
         score: opportunity.score,
         reentryNumberForSymbol: sameSymbol.length + 1,
         hedging,
+        spreadPoints,
+        maxSpreadPoints: settings.forexMaxSpreadPoints,
       },
     };
 
-    // Forex may repeat a symbol, but the DB rejects the exact same active signal fingerprint.
     this.repository.createTradeAtomically(reserved);
 
     try {
@@ -134,6 +166,7 @@ export class ForexExecutionService {
         symbol,
         reentryNumberForSymbol: sameSymbol.length + 1,
         hedging,
+        spreadPoints,
       });
 
       const opened = this.database.getActiveTrades('MT5').find((trade) => trade.id === id);
