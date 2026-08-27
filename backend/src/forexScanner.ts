@@ -35,6 +35,10 @@ export class ForexMarketScanner {
   async runCycle(): Promise<void> {
     if (this.running) return;
     const settings = this.getSettings();
+    if (!settings.engineEnabled) {
+      this.saveState({ status: 'PAUSED', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
+      return;
+    }
     if (!settings.forexEnabled) {
       this.saveState({ status: 'DISABLED', completedAt: Date.now(), mode: 'SIGNAL_ONLY' });
       return;
@@ -92,7 +96,6 @@ export class ForexMarketScanner {
       let sent = 0;
       for (const signal of qualified) {
         this.repository.saveSignal(signal);
-        // Signal-only opportunities are intentionally never auto-executed.
         this.repository.rejectOpportunity(signal.id, 'FOREX_SIGNAL_ONLY_MANUAL_EXECUTION');
         if (this.wasSent(signal.signalFingerprint)) continue;
 
@@ -148,8 +151,6 @@ export class ForexMarketScanner {
       return null;
     }
 
-    // A new Telegram signal is generated only when the pair leaves a valid setup
-    // and later enters a valid setup again. This is the manual-Forex retest rule.
     if (this.signalZoneActive.get(symbol) === true) return null;
     this.signalZoneActive.set(symbol, true);
 
@@ -166,7 +167,6 @@ export class ForexMarketScanner {
       id: `OP-FX-${fingerprint.slice(0, 24)}`,
       signalId: `SIG-FX-${fingerprint.slice(0, 24)}`,
       signalFingerprint: fingerprint,
-      // Legacy DB schema names Forex as MT5. metadata.executionMode is authoritative.
       broker: 'MT5',
       symbol,
       side: signal.side,
