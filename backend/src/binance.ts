@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { env } from './config.js';
+import type { BinanceCredentials } from './integrationVault.js';
 import type { EngineSettings, TradeSide } from './types.js';
 import type { BinanceSymbolFilters } from './risk.js';
 
@@ -48,16 +49,33 @@ export class BinanceUsdmClient {
   private timeOffset = 0;
   private symbolMeta = new Map<string, BinanceSymbolMeta>();
 
-  constructor(private readonly getSettings: () => EngineSettings) {}
+  constructor(
+    private readonly getSettings: () => EngineSettings,
+    private readonly getCredentials?: () => BinanceCredentials | null,
+  ) {}
 
   private baseUrl(): string {
     const mode = this.getSettings().appMode;
     return mode === 'TESTNET' ? env.BINANCE_TESTNET_BASE_URL : env.BINANCE_BASE_URL;
   }
 
-  private requireCredentials(): void {
-    if (!env.BINANCE_API_KEY || !env.BINANCE_API_SECRET) {
-      throw new Error('BINANCE_CREDENTIALS_NOT_CONFIGURED');
+  private credentials(): BinanceCredentials {
+    const fromVault = this.getCredentials?.();
+    if (fromVault?.apiKey && fromVault?.apiSecret) return fromVault;
+
+    // Legacy fallback to help migrate an existing single-user installation.
+    if (env.BINANCE_API_KEY && env.BINANCE_API_SECRET) {
+      return { apiKey: env.BINANCE_API_KEY, apiSecret: env.BINANCE_API_SECRET };
+    }
+    throw new Error('BINANCE_CREDENTIALS_NOT_CONFIGURED');
+  }
+
+  hasCredentials(): boolean {
+    try {
+      this.credentials();
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -73,7 +91,7 @@ export class BinanceUsdmClient {
     method: 'GET' | 'POST' | 'DELETE',
     params: Record<string, string | number | boolean | undefined> = {},
   ): Promise<T> {
-    this.requireCredentials();
+    const credentials = this.credentials();
 
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
@@ -83,7 +101,7 @@ export class BinanceUsdmClient {
     query.set('recvWindow', '5000');
 
     const signature = crypto
-      .createHmac('sha256', env.BINANCE_API_SECRET)
+      .createHmac('sha256', credentials.apiSecret)
       .update(query.toString())
       .digest('hex');
     query.set('signature', signature);
@@ -93,7 +111,7 @@ export class BinanceUsdmClient {
     const response = await fetch(url, {
       method,
       headers: {
-        'X-MBX-APIKEY': env.BINANCE_API_KEY,
+        'X-MBX-APIKEY': credentials.apiKey,
         ...(isGet ? {} : { 'Content-Type': 'application/x-www-form-urlencoded' }),
       },
       body: isGet ? undefined : query.toString(),
@@ -113,6 +131,16 @@ export class BinanceUsdmClient {
     }
 
     return data as T;
+  }
+
+  async testConnection(): Promise<{ ok: true; balance: number; availableBalance: number; openPositions: number }> {
+    await this.syncTime();
+    const [balance, availableBalance, positions] = await Promise.all([
+      this.getFuturesBalance(),
+      this.getAvailableBalance(),
+      this.getPositions(),
+    ]);
+    return { ok: true, balance, availableBalance, openPositions: positions.length };
   }
 
   async refreshExchangeInfo(): Promise<void> {
@@ -226,7 +254,6 @@ export class BinanceUsdmClient {
       return { paper: true, algoId: `PAPER-${type}-${Date.now()}` };
     }
 
-    // USD-M conditional exits were migrated to the Algo Service.
     return this.signedRequest('/fapi/v1/algoOrder', 'POST', {
       algoType: 'CONDITIONAL',
       symbol: symbol.toUpperCase(),
