@@ -57,4 +57,4 @@ else
 fi
 
 echo
-echo "OK. Abre/recarga http://127.0.0.1:8080 y verifica que release.txt indique 2026.08.27-R4."
+echo "OK. Abre/recarga http://127.0.0.1:8080 y verifica que release.txt indique 2026.08.27-R5."
