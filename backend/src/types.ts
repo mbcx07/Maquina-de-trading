@@ -94,6 +94,9 @@ export interface EngineSettings {
   cryptoRequestedLeverage: number;
   cryptoMaxAccountExposurePct: number;
   cryptoMaxLossPctPerTrade: number;
+  // Minimum movement of the UNDERLYING price. Leverage affects margin ROI, not these trigger prices.
+  cryptoMinStopPricePct: number;
+  cryptoMinTakeProfitPricePct: number;
   cryptoMinSignalConfidence: number;
   cryptoMinRollingWinRate: number;
 
