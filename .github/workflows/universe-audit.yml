@@ -1,20 +1,15 @@
 name: V33.5 Binance Universe Audit
 
+# GitHub-hosted US runners receive HTTP 451 from Binance USD-M market endpoints.
+# Production qualification therefore runs automatically inside the Linux V34 VPS.
+# Keep this workflow only for a future self-hosted runner in an allowed region.
 on:
-  push:
-    branches:
-      - feature/v34-dual-market-engine
-    paths:
-      - '.github/workflows/universe-audit.yml'
-      - 'backend/src/universeAuditCore.ts'
-      - 'backend/src/universeAuditCli.ts'
-      - 'backend/src/analysisV335.ts'
-      - 'backend/src/binanceMarket.ts'
+  workflow_dispatch:
 
 jobs:
   audit:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: self-hosted
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
