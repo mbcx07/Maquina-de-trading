@@ -16,13 +16,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+async function startEngineAndScanners(): Promise<any> {
+  const started = await request<any>('/api/engine/start', { method: 'POST' });
+  // Do not leave either desk showing a stale PAUSED state until its timer fires.
+  // Each scanner still applies its own enabled/configuration/risk gates.
+  const [crypto, forex] = await Promise.allSettled([
+    request<any>('/api/scanners/crypto/run', { method: 'POST' }),
+    request<any>('/api/scanners/forex/run', { method: 'POST' }),
+  ]);
+  return {
+    ...started,
+    immediateScans: {
+      crypto: crypto.status === 'fulfilled' ? crypto.value : { error: String(crypto.reason) },
+      forex: forex.status === 'fulfilled' ? forex.value : { error: String(forex.reason) },
+    },
+  };
+}
+
 export const v34Api = {
   getState: () => request<any>('/api/state'),
   patchSettings: (patch: Record<string, unknown>) => request('/api/settings', {
     method: 'PATCH',
     body: JSON.stringify(patch),
   }),
-  startEngine: () => request('/api/engine/start', { method: 'POST' }),
+  startEngine: startEngineAndScanners,
   pauseEngine: () => request('/api/engine/pause', { method: 'POST' }),
   emergencyStop: () => request('/api/emergency-stop', { method: 'POST' }),
   reconcile: () => request('/api/reconcile', { method: 'POST' }),
