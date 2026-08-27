@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
 import MetaTrader5 as mt5
@@ -35,32 +36,17 @@ def ensure_mt5() -> None:
         raise HTTPException(status_code=503, detail={"error": "MT5_INITIALIZE_FAILED", "last_error": mt5.last_error()})
 
 
-@router.get("/rates/{symbol}")
-def rates(
-    symbol: str,
-    timeframe: str = "M1",
-    count: int = 220,
-    x_bridge_token: Optional[str] = Header(default=None),
-):
-    authorize(x_bridge_token)
-    ensure_mt5()
-
+def ensure_symbol(symbol: str):
     normalized = symbol.strip()
-    tf = TIMEFRAMES.get(timeframe.upper())
-    if tf is None:
-        raise HTTPException(status_code=400, detail=f"Unsupported timeframe: {timeframe}")
-    count = max(50, min(int(count), 1000))
-
     info = mt5.symbol_info(normalized)
     if info is None:
         raise HTTPException(status_code=404, detail=f"Unknown MT5 symbol: {normalized}")
     if not info.visible and not mt5.symbol_select(normalized, True):
         raise HTTPException(status_code=400, detail={"error": "MT5_SYMBOL_SELECT_FAILED", "last_error": mt5.last_error()})
+    return normalized
 
-    rows = mt5.copy_rates_from_pos(normalized, tf, 0, count)
-    if rows is None:
-        raise HTTPException(status_code=503, detail={"error": "MT5_COPY_RATES_FAILED", "last_error": mt5.last_error()})
 
+def serialize_rates(rows):
     return [
         {
             "time": int(row["time"]) * 1000,
@@ -74,6 +60,57 @@ def rates(
         }
         for row in rows
     ]
+
+
+@router.get("/rates/{symbol}")
+def rates(
+    symbol: str,
+    timeframe: str = "M1",
+    count: int = 220,
+    x_bridge_token: Optional[str] = Header(default=None),
+):
+    authorize(x_bridge_token)
+    ensure_mt5()
+
+    normalized = ensure_symbol(symbol)
+    tf = TIMEFRAMES.get(timeframe.upper())
+    if tf is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported timeframe: {timeframe}")
+    count = max(50, min(int(count), 5000))
+
+    rows = mt5.copy_rates_from_pos(normalized, tf, 0, count)
+    if rows is None:
+        raise HTTPException(status_code=503, detail={"error": "MT5_COPY_RATES_FAILED", "last_error": mt5.last_error()})
+    return serialize_rates(rows)
+
+
+@router.get("/rates-range/{symbol}")
+def rates_range(
+    symbol: str,
+    timeframe: str,
+    start_ms: int,
+    end_ms: int,
+    x_bridge_token: Optional[str] = Header(default=None),
+):
+    authorize(x_bridge_token)
+    ensure_mt5()
+
+    if end_ms <= start_ms:
+        raise HTTPException(status_code=400, detail="Invalid time range")
+    if end_ms - start_ms > 40 * 24 * 60 * 60 * 1000:
+        raise HTTPException(status_code=400, detail="Range too large; maximum is 40 days including warm-up")
+
+    normalized = ensure_symbol(symbol)
+    tf = TIMEFRAMES.get(timeframe.upper())
+    if tf is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported timeframe: {timeframe}")
+
+    start_dt = datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc)
+    end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
+    rows = mt5.copy_rates_range(normalized, tf, start_dt, end_dt)
+    if rows is None:
+        raise HTTPException(status_code=503, detail={"error": "MT5_COPY_RATES_RANGE_FAILED", "last_error": mt5.last_error()})
+    return serialize_rates(rows)
 
 
 @router.get("/symbols")
