@@ -92,13 +92,6 @@ export class TradingDatabase {
       CREATE INDEX IF NOT EXISTS idx_trades_symbol_state ON trades(symbol, state);
       CREATE INDEX IF NOT EXISTS idx_trades_close_time ON trades(close_time DESC);
 
-      -- Critical invariant: Binance may have only one active local trade per symbol.
-      -- This protects against simultaneous async signals racing each other.
-      CREATE UNIQUE INDEX IF NOT EXISTS ux_binance_active_symbol
-        ON trades(symbol)
-        WHERE broker = 'BINANCE'
-          AND state IN ('PENDING','OPENING','OPEN','CLOSING','SYNC_REQUIRED');
-
       -- Forex deliberately has NO unique(symbol) constraint. Multiple MT5 tickets
       -- for the same pair are allowed when they represent different signals/retests.
       CREATE UNIQUE INDEX IF NOT EXISTS ux_mt5_active_signal_fingerprint
@@ -156,7 +149,18 @@ export class TradingDatabase {
         WHERE broker='BINANCE' AND broker_order_id LIKE 'PAPER-%'
       `).run();
     }
-    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_trades_execution_mode ON trades(execution_mode, created_at DESC)`);
+
+    // Each execution mode is an independent account. PAPER must not block a REAL or
+    // TESTNET BTCUSDT record, while each mode still permits only one active trade per symbol.
+    this.db.exec(`
+      DROP INDEX IF EXISTS ux_binance_active_symbol;
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_binance_active_mode_symbol
+        ON trades(execution_mode, symbol)
+        WHERE broker = 'BINANCE'
+          AND state IN ('PENDING','OPENING','OPEN','CLOSING','SYNC_REQUIRED');
+      CREATE INDEX IF NOT EXISTS idx_trades_execution_mode
+        ON trades(execution_mode, created_at DESC);
+    `);
   }
 
   getSettings(): EngineSettings | null {
