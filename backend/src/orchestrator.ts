@@ -40,7 +40,11 @@ export class OpportunityOrchestrator {
       opportunity.confidence >= settings.cryptoMinSignalConfidence &&
       opportunity.rollingWinRate >= settings.cryptoMinRollingWinRate,
     );
-    const eligibleForex = opportunities.filter((opportunity) => opportunity.broker === 'MT5');
+    const eligibleForex = opportunities.filter((opportunity) =>
+      opportunity.broker === 'MT5' &&
+      opportunity.confidence >= settings.forexMinSignalConfidence &&
+      opportunity.rollingWinRate >= settings.forexMinRollingWinRate,
+    );
 
     const selectedCrypto = selectCryptoOpportunities(eligibleCrypto, context);
     const selectedForex = selectForexOpportunities(eligibleForex, context);
