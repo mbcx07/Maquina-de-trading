@@ -2,6 +2,7 @@ import { Router, type Request } from 'express';
 import { z } from 'zod';
 import { BinanceUsdmClient } from './binance.js';
 import { IntegrationVault, normalizeWorkspaceId, type IntegrationProvider } from './integrationVault.js';
+import { Mt5BridgeClient } from './mt5.js';
 import { TelegramService } from './telegram.js';
 import type { EngineSettings } from './types.js';
 
@@ -18,11 +19,7 @@ export function createIntegrationRouter(
   router.get('/', (req, res) => {
     try {
       const workspaceId = workspaceFor(req);
-      res.json({
-        ok: true,
-        workspaceId,
-        integrations: vault.getStatus(workspaceId),
-      });
+      res.json({ ok: true, workspaceId, integrations: vault.getStatus(workspaceId) });
     } catch (error) {
       res.status(400).json({ error: message(error) });
     }
@@ -35,15 +32,9 @@ export function createIntegrationRouter(
         apiKey: z.string().min(8).max(512),
         apiSecret: z.string().min(8).max(512),
       }).parse(req.body);
-
       vault.saveBinance(workspaceId, body);
       const test = await testBinance(vault, workspaceId, getSettings);
-      res.json({
-        ok: test.ok,
-        workspaceId,
-        test,
-        integrations: vault.getStatus(workspaceId),
-      });
+      res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
     } catch (error) {
       res.status(400).json({ error: message(error) });
     }
@@ -56,15 +47,24 @@ export function createIntegrationRouter(
         botToken: z.string().min(10).max(512),
         chatId: z.string().min(1).max(128),
       }).parse(req.body);
-
       vault.saveTelegram(workspaceId, body);
       const test = await testTelegram(vault, workspaceId);
-      res.json({
-        ok: test.ok,
-        workspaceId,
-        test,
-        integrations: vault.getStatus(workspaceId),
-      });
+      res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
+    } catch (error) {
+      res.status(400).json({ error: message(error) });
+    }
+  });
+
+  router.put('/mt5', async (req, res) => {
+    try {
+      const workspaceId = workspaceFor(req);
+      const body = z.object({
+        bridgeUrl: z.string().url().max(1024),
+        bridgeToken: z.string().min(4).max(512),
+      }).parse(req.body);
+      vault.saveMt5(workspaceId, body);
+      const test = await testMt5(vault, workspaceId, getSettings);
+      res.json({ ok: test.ok, workspaceId, test, integrations: vault.getStatus(workspaceId) });
     } catch (error) {
       res.status(400).json({ error: message(error) });
     }
@@ -76,7 +76,9 @@ export function createIntegrationRouter(
       const provider = providerFrom(req.params.provider);
       const test = provider === 'BINANCE'
         ? await testBinance(vault, workspaceId, getSettings)
-        : await testTelegram(vault, workspaceId);
+        : provider === 'TELEGRAM'
+          ? await testTelegram(vault, workspaceId)
+          : await testMt5(vault, workspaceId, getSettings);
       res.status(test.ok ? 200 : 400).json({
         ok: test.ok,
         workspaceId,
@@ -94,12 +96,7 @@ export function createIntegrationRouter(
       const workspaceId = workspaceFor(req);
       const provider = providerFrom(req.params.provider);
       vault.remove(workspaceId, provider);
-      res.json({
-        ok: true,
-        workspaceId,
-        provider,
-        integrations: vault.getStatus(workspaceId),
-      });
+      res.json({ ok: true, workspaceId, provider, integrations: vault.getStatus(workspaceId) });
     } catch (error) {
       res.status(400).json({ error: message(error) });
     }
@@ -113,10 +110,8 @@ async function testBinance(
   workspaceId: string,
   getSettings: () => EngineSettings,
 ): Promise<Record<string, unknown>> {
-  const credentials = vault.getBinance(workspaceId);
-  if (!credentials) throw new Error('BINANCE_CREDENTIALS_NOT_CONFIGURED');
+  if (!vault.getBinance(workspaceId)) throw new Error('BINANCE_CREDENTIALS_NOT_CONFIGURED');
   const client = new BinanceUsdmClient(getSettings, () => vault.getBinance(workspaceId));
-
   try {
     const result = await client.testConnection();
     vault.markTest(workspaceId, 'BINANCE', true);
@@ -132,10 +127,8 @@ async function testTelegram(
   vault: IntegrationVault,
   workspaceId: string,
 ): Promise<Record<string, unknown>> {
-  const credentials = vault.getTelegram(workspaceId);
-  if (!credentials) throw new Error('TELEGRAM_CREDENTIALS_NOT_CONFIGURED');
+  if (!vault.getTelegram(workspaceId)) throw new Error('TELEGRAM_CREDENTIALS_NOT_CONFIGURED');
   const telegram = new TelegramService(() => vault.getTelegram(workspaceId));
-
   try {
     const result = await telegram.testConnection();
     vault.markTest(workspaceId, 'TELEGRAM', true);
@@ -147,9 +140,42 @@ async function testTelegram(
   }
 }
 
+async function testMt5(
+  vault: IntegrationVault,
+  workspaceId: string,
+  getSettings: () => EngineSettings,
+): Promise<Record<string, unknown>> {
+  if (!vault.getMt5(workspaceId)) throw new Error('MT5_BRIDGE_NOT_CONFIGURED');
+  const client = new Mt5BridgeClient(getSettings, () => vault.getMt5(workspaceId));
+  try {
+    const result = await client.health();
+    vault.markTest(workspaceId, 'MT5', true);
+    return {
+      ok: true,
+      account: {
+        login: result.account.login,
+        server: result.account.server,
+        currency: result.account.currency,
+        hedging: result.account.hedging,
+        balance: result.account.balance,
+        equity: result.account.equity,
+        leverage: result.account.leverage,
+        tradeAllowed: result.account.tradeAllowed,
+        tradeExpert: result.account.tradeExpert,
+      },
+    };
+  } catch (error) {
+    const detail = message(error);
+    vault.markTest(workspaceId, 'MT5', false, detail);
+    return { ok: false, error: detail };
+  }
+}
+
 function providerFrom(value: string | undefined): IntegrationProvider {
   const provider = String(value || '').toUpperCase();
-  if (provider !== 'BINANCE' && provider !== 'TELEGRAM') throw new Error('UNKNOWN_INTEGRATION_PROVIDER');
+  if (provider !== 'BINANCE' && provider !== 'TELEGRAM' && provider !== 'MT5') {
+    throw new Error('UNKNOWN_INTEGRATION_PROVIDER');
+  }
   return provider;
 }
 
