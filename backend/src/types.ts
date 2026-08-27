@@ -84,6 +84,7 @@ export interface EngineSettings {
   riskKillSwitchEnabled: boolean;
   dailyLossLimitPct: number;
   maxDrawdownPct: number;
+  emergencyStopMode: 'PAUSE_ONLY' | 'CLOSE_TRACKED';
 
   cryptoEnabled: boolean;
   maxConcurrentCryptoTrades: number;
@@ -104,6 +105,7 @@ export interface EngineSettings {
   forexMinRollingWinRate: number;
   forexMagicNumber: number;
   forexMaxDeviationPoints: number;
+  forexMaxSpreadPoints: number;
 }
 
 export interface CryptoSizingInput {
