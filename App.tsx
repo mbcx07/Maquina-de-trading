@@ -92,7 +92,7 @@ const App: React.FC = () => {
         {error && <Banner tone="error">{error}</Banner>}
         {notice && <Banner tone="ok">{notice}</Banner>}
 
-        {view === 'dashboard' && <Dashboard state={state} patchSettings={patchSettings} />}
+        {view === 'dashboard' && <Dashboard state={state} patchSettings={patchSettings} run={run} busy={busy} />}
         {view === 'settings' && (
           <SettingsView
             state={state}
@@ -113,6 +113,12 @@ function Header({ state, view, setView, busy, lastSync, engineOn, patchSettings,
   const telegram = state.brokerStatus?.telegram || {};
   const forexData = state.brokerStatus?.forexData || {};
 
+  const forexLabel = forexData.connected
+    ? 'Forex Data'
+    : forexData.configured
+      ? 'Forex revisar'
+      : 'Forex pendiente';
+
   return (
     <header className="bg-[#0d1117] border border-slate-800 rounded-[2rem] p-4 md:p-6 shadow-2xl">
       <div className="flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-5">
@@ -123,9 +129,10 @@ function Header({ state, view, setView, busy, lastSync, engineOn, patchSettings,
               QUANTUM<span className="text-indigo-500">DUAL</span> V34
             </h1>
             <div className="flex flex-wrap gap-3 mt-2 text-[8px] font-black uppercase tracking-widest text-slate-500">
-              <Connection label="Binance" ok={Boolean(binance.connected) || settings.appMode === 'PAPER'} />
-              <Connection label={forexData.configured ? 'Forex Data' : 'Forex pendiente'} ok={Boolean(forexData.connected)} pending={!forexData.configured} />
+              <Connection label={settings.appMode === 'PAPER' ? 'Paper Broker' : 'Binance'} ok={Boolean(binance.connected) || settings.appMode === 'PAPER'} />
+              <Connection label={forexLabel} ok={Boolean(forexData.connected)} pending={!forexData.configured} />
               <Connection label={telegram.configured ? 'Telegram' : 'Telegram pendiente'} ok={Boolean(telegram.connected)} pending={!telegram.configured} />
+              <span>{settings.appMode}</span>
               <span>Linux</span>
               <span>DB persistent</span>
               <span>Sync {lastSync ? new Date(lastSync).toLocaleTimeString() : '—'}</span>
@@ -170,9 +177,10 @@ function Header({ state, view, setView, busy, lastSync, engineOn, patchSettings,
   );
 }
 
-function Dashboard({ state, patchSettings }: any) {
+function Dashboard({ state, patchSettings, run, busy }: any) {
   const settings = state.settings || {};
-  const metrics = state.metrics?.crypto || emptyMetrics;
+  const paper = state.paper || {};
+  const metrics = settings.appMode === 'PAPER' ? (paper.metrics || emptyMetrics) : (state.metrics?.crypto || emptyMetrics);
   const crypto = state.active?.crypto || [];
   const cryptoOpps = state.opportunities?.crypto || [];
   const forexSignals = state.forexSignals || [];
@@ -180,31 +188,45 @@ function Dashboard({ state, patchSettings }: any) {
   const recentTrades = state.recentTrades || [];
   const binance = state.brokerStatus?.binance || {};
   const forexData = state.brokerStatus?.forexData || {};
+  const forexScanner = state.scanners?.forex || {};
+  const forexDiagnostics = state.forexDiagnostics || [];
+
+  const accountBalance = settings.appMode === 'PAPER' ? paper.balance : binance.balance;
+  const accountAvailable = binance.availableBalance;
+  const accountEquity = settings.appMode === 'PAPER' ? paper.equity : undefined;
 
   return (
     <>
       <section className="grid grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8 gap-3">
-        <Metric title="Saldo Futures" value={settings.appMode === 'PAPER' ? 'PAPER' : binance.connected ? money(binance.balance) : '—'} />
-        <Metric title="Disponible" value={settings.appMode === 'PAPER' ? 'PAPER' : binance.connected ? money(binance.availableBalance) : '—'} />
+        <Metric title={settings.appMode === 'PAPER' ? 'Paper Balance' : 'Saldo Futures'} value={binance.connected ? money(accountBalance) : '—'} />
+        <Metric title={settings.appMode === 'PAPER' ? 'Paper Equity' : 'Disponible'} value={settings.appMode === 'PAPER' ? money(accountEquity) : binance.connected ? money(accountAvailable) : '—'} />
         <Metric title="Net Profit" value={money(metrics.netProfit)} tone={Number(metrics.netProfit) >= 0 ? 'green' : 'red'} />
         <Metric title="Win Rate" value={pct(metrics.winRate)} />
         <Metric title="Profit Factor" value={factor(metrics.profitFactor)} />
-        <Metric title="Trades cerrados" value={String(metrics.trades || 0)} />
+        <Metric title="Expectancy" value={money(metrics.expectancy)} />
         <Metric title="Crypto abiertos" value={`${crypto.length}/${settings.maxConcurrentCryptoTrades}`} />
         <Metric title="Forex signals 24h" value={String(forexStats.sent24h || 0)} />
       </section>
 
+      {settings.appMode === 'PAPER' && (
+        <PaperAnalytics
+          paper={paper}
+          busy={busy}
+          onClose={(id: string) => run(() => v34Api.closePaperTrade(id), 'Operación PAPER cerrada al mark price actual.')}
+        />
+      )}
+
       {settings.appMode !== 'PAPER' && binance.configured && !binance.connected && (
-        <Banner tone="error">Binance está configurado pero no pudo consultar la cuenta: {binance.error || 'revisa permisos Futures, IP whitelist y API Key/Secret.'}</Banner>
+        <Banner tone="error">Binance está configurado pero no pudo consultar la cuenta: {binance.error || binance.lastError || 'revisa permisos Futures, IP whitelist y API Key/Secret.'}</Banner>
       )}
 
       <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <MarketPanel title="CRYPTO · BINANCE FUTURES" subtitle="Automático · máximo 10 coins · símbolos únicos" accent="indigo">
+        <MarketPanel title="CRYPTO · BINANCE FUTURES" subtitle={`${settings.appMode} · automático · máximo 10 coins · símbolos únicos`} accent="indigo">
           <ScannerLine scanner={state.scanners?.crypto} />
           <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
-            <InfoBox label="Saldo Futures" value={settings.appMode === 'PAPER' ? 'PAPER' : binance.connected ? money(binance.balance) : '—'} />
-            <InfoBox label="Disponible" value={settings.appMode === 'PAPER' ? 'PAPER' : binance.connected ? money(binance.availableBalance) : '—'} />
-            <InfoBox label="API Binance" value={settings.appMode === 'PAPER' ? 'PAPER' : binance.connected ? 'CONECTADA' : binance.configured ? 'REVISAR' : 'NO CONFIGURADA'} />
+            <InfoBox label={settings.appMode === 'PAPER' ? 'Paper Balance' : 'Saldo Futures'} value={binance.connected ? money(accountBalance) : '—'} />
+            <InfoBox label={settings.appMode === 'PAPER' ? 'Paper Equity' : 'Disponible'} value={settings.appMode === 'PAPER' ? money(accountEquity) : binance.connected ? money(accountAvailable) : '—'} />
+            <InfoBox label="Feed / cuenta" value={settings.appMode === 'PAPER' ? 'BINANCE MARK PRICE' : binance.connected ? 'CONECTADA' : binance.configured ? 'REVISAR' : 'NO CONFIGURADA'} />
             <NumberSetting label="Slots" value={settings.maxConcurrentCryptoTrades} min={1} max={10} step={1} suffix="/10" onSave={(v: number) => patchSettings({ maxConcurrentCryptoTrades: v })} />
             <NumberSetting label="Margen / trade" value={settings.cryptoMarginPctPerTrade} min={0.01} max={100} step={0.1} suffix="%" onSave={(v: number) => patchSettings({ cryptoMarginPctPerTrade: v })} />
             <NumberSetting label="Leverage" value={settings.cryptoRequestedLeverage} min={1} max={125} step={1} suffix="x" onSave={(v: number) => patchSettings({ cryptoRequestedLeverage: v })} />
@@ -212,33 +234,179 @@ function Dashboard({ state, patchSettings }: any) {
             <NumberSetting label="Confianza mín." value={settings.cryptoMinSignalConfidence} min={0} max={100} step={1} suffix="%" onSave={(v: number) => patchSettings({ cryptoMinSignalConfidence: v })} />
             <NumberSetting label="Rolling WR mín." value={settings.cryptoMinRollingWinRate} min={0} max={100} step={1} suffix="%" onSave={(v: number) => patchSettings({ cryptoMinRollingWinRate: v })} />
           </div>
-          <Block title="POSICIONES ABIERTAS"><PositionTable rows={crypto} /></Block>
+          <Block title="POSICIONES ABIERTAS">
+            <PositionTable
+              rows={crypto}
+              paper={settings.appMode === 'PAPER'}
+              busy={busy}
+              onClose={(id: string) => run(() => v34Api.closePaperTrade(id), 'Operación PAPER cerrada.')}
+            />
+          </Block>
           <Block title="TOP OPORTUNIDADES"><OpportunityTable rows={cryptoOpps} /></Block>
-          <Block title="HISTORIAL BINANCE"><TradeHistory rows={recentTrades.slice(0, 20)} /></Block>
+          <Block title={`HISTORIAL ${settings.appMode}`}><TradeHistory rows={recentTrades.slice(0, 30)} /></Block>
         </MarketPanel>
 
         <MarketPanel title="FOREX · SIGNAL DESK" subtitle="Solo señales Telegram · ejecución manual · opcional" accent="cyan">
           {!forexData.configured && (
             <div className="rounded-2xl bg-amber-500/5 border border-amber-500/20 p-4 text-[9px] text-amber-200/80 leading-5">
-              FOREX PENDIENTE. Puedes conectarlo después; no bloquea Binance ni el arranque del motor Crypto.
+              FOREX PENDIENTE. Conecta Twelve Data cuando quieras; no bloquea Binance.
             </div>
           )}
-          <ScannerLine scanner={state.scanners?.forex} />
+          {forexData.configured && !forexData.connected && (
+            <div className="rounded-2xl bg-rose-500/5 border border-rose-500/20 p-4 text-[9px] text-rose-200/80 leading-5">
+              FOREX DATA NO VALIDADO: {forexData.lastError || 'pulsa Probar en Configuración para obtener el error exacto.'}
+            </div>
+          )}
+          {forexData.connected && forexScanner.status === 'IDLE' && forexScanner.diagnostic === 'NO_VALID_SETUP_NOW' && (
+            <div className="rounded-2xl bg-cyan-500/5 border border-cyan-500/20 p-4 text-[9px] text-cyan-100/80 leading-5">
+              DATOS FOREX CONECTADOS. El último ciclo terminó correctamente, pero no encontró un setup que cumpliera los filtros.
+            </div>
+          )}
+          <ScannerLine scanner={forexScanner} />
           <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
-            <InfoBox label="Modo" value="SIGNAL ONLY" />
+            <InfoBox label="Data" value={forexData.connected ? 'CONECTADA' : forexData.configured ? 'REVISAR' : 'PENDIENTE'} />
+            <InfoBox label="Scanner" value={String(forexScanner.status || '—')} />
             <InfoBox label="Signals 24h" value={String(forexStats.sent24h || 0)} />
             <InfoBox label="Signals 7d" value={String(forexStats.sent7d || 0)} />
             <NumberSetting label="Escaneo" value={settings.forexSignalScanIntervalMinutes} min={1} max={1440} step={1} suffix="min" onSave={(v: number) => patchSettings({ forexSignalScanIntervalMinutes: v })} />
             <NumberSetting label="Confianza mín." value={settings.forexMinSignalConfidence} min={0} max={100} step={1} suffix="%" onSave={(v: number) => patchSettings({ forexMinSignalConfidence: v })} />
-            <NumberSetting label="Rolling WR mín." value={settings.forexMinRollingWinRate} min={0} max={100} step={1} suffix="%" onSave={(v: number) => patchSettings({ forexMinRollingWinRate: v })} />
           </div>
+          <div className="flex flex-wrap gap-2">
+            <SecondaryButton disabled={busy || !forexData.configured} onClick={() => run(() => v34Api.runForexScanner(), 'Scanner Forex ejecutado.')}>Escanear Forex ahora</SecondaryButton>
+          </div>
+          {forexDiagnostics.length > 0 && (
+            <Block title="DIAGNÓSTICO FOREX">
+              <div className="divide-y divide-slate-900">
+                {forexDiagnostics.slice(0, 8).map((d: any, i: number) => (
+                  <div key={`${d.key || d.symbol}-${i}`} className="p-3 text-[8px] leading-5">
+                    <span className="font-black text-rose-300">{d.symbol || d.key}</span>
+                    <span className="text-slate-500"> · {d.error || 'Error de datos'}</span>
+                  </div>
+                ))}
+              </div>
+            </Block>
+          )}
           <div className="rounded-2xl bg-cyan-500/5 border border-cyan-500/20 p-4 text-[9px] text-cyan-100/70 leading-5">
-            Forex nunca envía órdenes al broker en esta edición. Cada retest nuevo genera, si pasa los filtros, una alerta con entrada de referencia, SL, TP, R:R, confianza y score.
+            Forex nunca envía órdenes al broker en esta edición. Cada señal válida incluye entrada de referencia, SL, TP, R:R, confianza, rolling WR y score.
           </div>
           <Block title="ÚLTIMAS SEÑALES FOREX"><ForexSignalTable rows={forexSignals} /></Block>
         </MarketPanel>
       </section>
     </>
+  );
+}
+
+function PaperAnalytics({ paper, busy, onClose }: any) {
+  const m = paper?.metrics || emptyMetrics;
+  const curve = paper?.equityCurve || [];
+  const bySymbol = Object.entries(paper?.bySymbol || {}) as Array<[string, any]>;
+  const active = paper?.activeTrades || [];
+  const recent = paper?.recentTrades || [];
+
+  return (
+    <section className="bg-gradient-to-br from-indigo-950/25 via-[#0d1117] to-[#071018] border border-indigo-800/30 rounded-[2rem] p-4 md:p-6 space-y-4 shadow-2xl">
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-3">
+        <div>
+          <p className="text-[8px] uppercase tracking-[0.28em] font-black text-indigo-400">Paper performance lab</p>
+          <h2 className="text-xl md:text-2xl font-black text-white mt-1">ESTADÍSTICA GENERAL · PAPER TRADING</h2>
+          <p className="text-[9px] text-slate-500 mt-2">Seguimiento con Binance Mark Price. SL/TP se resuelven automáticamente y, si ambos aparecen en la misma vela, se cuenta SL primero.</p>
+        </div>
+        <div className="text-[8px] text-slate-500">Costo round-trip configurado: <span className="text-white font-black">{pct(paper?.roundTripCostPct)}</span></div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-5 xl:grid-cols-10 gap-2">
+        <MiniMetric label="Inicial" value={money(paper?.initialBalance)} />
+        <MiniMetric label="Balance" value={money(paper?.balance)} />
+        <MiniMetric label="Equity" value={money(paper?.equity)} />
+        <MiniMetric label="Return" value={pct(paper?.returnPct)} tone={Number(paper?.returnPct) >= 0 ? 'green' : 'red'} />
+        <MiniMetric label="Net PnL" value={money(m.netProfit)} tone={Number(m.netProfit) >= 0 ? 'green' : 'red'} />
+        <MiniMetric label="Flotante" value={money(m.unrealizedPnl)} tone={Number(m.unrealizedPnl) >= 0 ? 'green' : 'red'} />
+        <MiniMetric label="Win Rate" value={pct(m.winRate)} />
+        <MiniMetric label="PF" value={factor(m.profitFactor)} />
+        <MiniMetric label="Expectancy" value={money(m.expectancy)} />
+        <MiniMetric label="Max DD" value={pct(paper?.maxDrawdownPct)} />
+      </div>
+
+      <div className="grid grid-cols-1 2xl:grid-cols-[1.35fr_.65fr] gap-4">
+        <Block title="CURVA DE EQUITY PAPER">
+          <PaperEquityChart points={curve} initialBalance={paper?.initialBalance} />
+        </Block>
+        <Block title="RESUMEN DE RESULTADOS">
+          <div className="grid grid-cols-2 gap-2 p-3">
+            <InfoBox label="Trades cerrados" value={String(m.trades || 0)} />
+            <InfoBox label="W / L / BE" value={`${m.wins || 0} / ${m.losses || 0} / ${m.breakeven || 0}`} />
+            <InfoBox label="Gross Profit" value={money(m.grossProfit)} />
+            <InfoBox label="Gross Loss" value={money(m.grossLoss)} />
+            <InfoBox label="Fees simuladas" value={money(m.fees)} />
+            <InfoBox label="Abiertas" value={String(m.openTrades || 0)} />
+            <InfoBox label="Average Win" value={money(m.averageWin)} />
+            <InfoBox label="Average Loss" value={money(m.averageLoss)} />
+          </div>
+        </Block>
+      </div>
+
+      <Block title="RESULTADOS POR COIN">
+        <PaperSymbolTable rows={bySymbol} />
+      </Block>
+
+      {active.length > 0 && (
+        <Block title="PAPER ABIERTAS · PNL EN VIVO">
+          <PositionTable rows={active} paper busy={busy} onClose={onClose} />
+        </Block>
+      )}
+
+      <Block title="TODAS LAS OPERACIONES PAPER">
+        <TradeHistory rows={recent} />
+      </Block>
+    </section>
+  );
+}
+
+function PaperEquityChart({ points, initialBalance }: any) {
+  const data = points?.length ? points : [{ time: Date.now(), equity: Number(initialBalance || 100) }];
+  const values = data.map((p: any) => Number(p.equity || 0));
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = Math.max(1e-9, max - min);
+  const width = 1000;
+  const height = 220;
+  const pad = 18;
+  const path = data.map((p: any, i: number) => {
+    const x = pad + (i / Math.max(1, data.length - 1)) * (width - pad * 2);
+    const y = height - pad - ((Number(p.equity || 0) - min) / range) * (height - pad * 2);
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(' ');
+
+  return (
+    <div className="p-3">
+      <div className="flex justify-between text-[8px] text-slate-600 mb-2"><span>{money(min)}</span><span>{data.length} snapshots</span><span>{money(max)}</span></div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-56 text-indigo-400" preserveAspectRatio="none">
+        <path d={path} fill="none" stroke="currentColor" strokeWidth="3" vectorEffect="non-scaling-stroke" />
+      </svg>
+    </div>
+  );
+}
+
+function PaperSymbolTable({ rows }: any) {
+  if (!rows.length) return <Empty text="Aún no hay estadísticas por símbolo" />;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[760px] text-[9px]">
+        <thead className="text-slate-600 uppercase"><tr><th className="p-3 text-left">Coin</th><th>Trades</th><th>Wins</th><th>Losses</th><th>WR</th><th>Net PnL</th><th>PF</th><th>Expectancy</th></tr></thead>
+        <tbody>{rows.map(([symbol, m]: [string, any]) => (
+          <tr key={symbol} className="border-t border-slate-900">
+            <td className="p-3 font-black text-white">{symbol}</td>
+            <td className="text-center">{m.trades || 0}</td>
+            <td className="text-center text-emerald-400">{m.wins || 0}</td>
+            <td className="text-center text-rose-400">{m.losses || 0}</td>
+            <td className="text-center">{pct(m.winRate)}</td>
+            <td className={`text-center font-black ${Number(m.netProfit) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{money(m.netProfit)}</td>
+            <td className="text-center">{factor(m.profitFactor)}</td>
+            <td className="text-center">{money(m.expectancy)}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
   );
 }
 
@@ -249,6 +417,7 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
   const telegram = statusOf(integrations, 'TELEGRAM');
   const forexData = statusOf(integrations, 'TWELVE_DATA');
   const binanceRuntime = state.brokerStatus?.binance || {};
+  const forexRuntime = state.brokerStatus?.forexData || {};
 
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
@@ -261,8 +430,24 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
 
   const saveSymbols = async () => {
     const symbols = forexSymbols.split(',').map((s) => s.trim().toUpperCase().replace('/', '')).filter(Boolean);
-    if (symbols.length) await patchSettings({ forexSymbols: symbols });
+    if (symbols.length) {
+      await patchSettings({ forexSymbols: symbols });
+      if (settings.engineEnabled) await run(() => v34Api.runForexScanner(), 'Pares guardados y scanner Forex ejecutado.');
+    }
   };
+
+  const saveForex = () => run(async () => {
+    const result = await v34Api.saveForexDataIntegration(forexDataKey.trim());
+    setForexDataKey('');
+    if (settings.engineEnabled) await v34Api.runForexScanner();
+    return result;
+  }, settings.engineEnabled ? 'Forex Data validado y scanner ejecutado.' : 'Forex Data guardado y validado.');
+
+  const testForex = () => run(async () => {
+    const result = await v34Api.testIntegration('twelve-data');
+    if (settings.engineEnabled) await v34Api.runForexScanner();
+    return result;
+  }, settings.engineEnabled ? 'Forex Data validado y scanner ejecutado.' : 'Forex Data validado.');
 
   const estimatedCredits = useMemo(() => {
     const count = (settings.forexSymbols || []).length;
@@ -276,7 +461,7 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
         <p className="text-[8px] uppercase tracking-[0.25em] font-black text-indigo-400">Linux individual</p>
         <h2 className="text-2xl md:text-3xl font-black text-white tracking-tight mt-2">Integraciones del motor</h2>
         <p className="text-[10px] text-slate-400 leading-6 mt-3 max-w-5xl">
-          Binance puede funcionar por sí solo. Forex Data y Telegram son opcionales mientras haces la prueba Crypto y puedes conectarlos después sin reinstalar el sistema.
+          Binance puede funcionar por sí solo. PAPER usa el market data público de Binance. Forex Data y Telegram pueden conectarse independientemente.
         </p>
       </section>
 
@@ -290,7 +475,7 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
           )}
           {settings.appMode !== 'PAPER' && binanceRuntime.configured && !binanceRuntime.connected && (
             <div className="rounded-xl bg-rose-500/5 border border-rose-500/20 p-3 text-[8px] text-rose-300 leading-5">
-              {binanceRuntime.error || 'No fue posible consultar Binance Futures.'}
+              {binanceRuntime.error || binanceRuntime.lastError || 'No fue posible consultar Binance Futures.'}
             </div>
           )}
           <TextField label="API Key" value={apiKey} onChange={setApiKey} placeholder={binance.configured ? 'Nueva API Key para reemplazar' : 'API Key'} />
@@ -308,21 +493,21 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
           />
         </IntegrationCard>
 
-        <IntegrationCard title="FOREX DATA · OPCIONAL" status={forexData} description="Twelve Data · puedes conectarlo después">
+        <IntegrationCard title="FOREX DATA · OPCIONAL" status={forexData} description="Twelve Data · market data para señales">
+          {forexRuntime.lastError && (
+            <div className="rounded-xl bg-rose-500/5 border border-rose-500/20 p-3 text-[8px] text-rose-300 leading-5">{forexRuntime.lastError}</div>
+          )}
           <TextField label="API Key" value={forexDataKey} onChange={setForexDataKey} placeholder={forexData.configured ? 'Nueva key para reemplazar' : 'Twelve Data API Key'} secret />
-          <Hint>No es requisito para Binance. La key se guarda cifrada y solo permite leer datos de mercado.</Hint>
+          <Hint>La key se valida al guardarla. Si el motor está activo, inmediatamente se ejecuta un ciclo Forex.</Hint>
           <div className="grid grid-cols-2 gap-2">
-            <InfoBox label="Pares" value={String((settings.forexSymbols || []).length)} />
+            <InfoBox label="Estado" value={String(forexRuntime.status || (forexData.configured ? 'REVISAR' : 'PENDIENTE'))} />
             <InfoBox label="Créditos/día est." value={String(estimatedCredits)} />
           </div>
           <IntegrationActions
             busy={busy}
             configured={forexData.configured}
-            save={() => run(async () => {
-              const r = await v34Api.saveForexDataIntegration(forexDataKey.trim());
-              setForexDataKey(''); return r;
-            }, 'Fuente Forex guardada y validada.')}
-            test={() => run(() => v34Api.testIntegration('twelve-data'), 'Forex Data validado.')}
+            save={saveForex}
+            test={testForex}
             remove={() => run(() => v34Api.removeIntegration('twelve-data'), 'Forex Data desconectado.')}
           />
         </IntegrationCard>
@@ -330,13 +515,15 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
         <IntegrationCard title="TELEGRAM · OPCIONAL" status={telegram} description="Alertas Crypto + señales Forex">
           <TextField label="Bot Token" value={botToken} onChange={setBotToken} placeholder={telegram.configured ? 'Nuevo token para reemplazar' : 'Token de BotFather'} secret />
           <TextField label="Chat ID / Canal" value={chatId} onChange={setChatId} placeholder="Chat ID" />
-          <Hint>Binance puede funcionar sin Telegram. Conéctalo después para recibir aperturas, cierres y señales Forex.</Hint>
+          <Hint>Para que Forex envíe señales necesitas Telegram conectado. Binance puede operar sin Telegram.</Hint>
           <IntegrationActions
             busy={busy}
             configured={telegram.configured}
             save={() => run(async () => {
               const r = await v34Api.saveTelegramIntegration(botToken.trim(), chatId.trim());
-              setBotToken(''); setChatId(''); return r;
+              setBotToken(''); setChatId('');
+              if (settings.engineEnabled && forexData.configured) await v34Api.runForexScanner();
+              return r;
             }, 'Telegram guardado y validado.')}
             test={() => run(() => v34Api.testIntegration('telegram'), 'Telegram validado.')}
             remove={() => run(() => v34Api.removeIntegration('telegram'), 'Telegram desconectado.')}
@@ -345,8 +532,10 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
       </section>
 
       <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <Panel title="RIESGO BINANCE">
+        <Panel title="RIESGO BINANCE / PAPER">
           <div className="grid grid-cols-2 gap-2">
+            <NumberSetting label="Capital inicial PAPER" value={settings.paperInitialBalance} min={1} max={1000000000} step={10} suffix="USDT" onSave={(v: number) => patchSettings({ paperInitialBalance: v })} />
+            <NumberSetting label="Costo round-trip PAPER" value={settings.paperRoundTripCostPct} min={0} max={10} step={0.01} suffix="%" onSave={(v: number) => patchSettings({ paperRoundTripCostPct: v })} />
             <NumberSetting label="Pérdida diaria máx." value={settings.dailyLossLimitPct} min={0.1} max={100} step={0.1} suffix="%" onSave={(v: number) => patchSettings({ dailyLossLimitPct: v })} />
             <NumberSetting label="Drawdown máximo" value={settings.maxDrawdownPct} min={0.1} max={100} step={0.1} suffix="%" onSave={(v: number) => patchSettings({ maxDrawdownPct: v })} />
             <SelectSetting label="Emergency Stop" value={settings.emergencyStopMode} options={[
@@ -357,6 +546,7 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
             <ToggleSetting label="Crypto activo" checked={Boolean(settings.cryptoEnabled)} onChange={(v: boolean) => patchSettings({ cryptoEnabled: v })} />
             <ToggleSetting label="Forex signals" checked={Boolean(settings.forexEnabled)} onChange={(v: boolean) => patchSettings({ forexEnabled: v })} />
           </div>
+          <div className="mt-3"><Hint>Configura el capital y costo PAPER antes de evaluar una corrida larga. Los costos se descuentan al cierre de cada operación simulada.</Hint></div>
         </Panel>
 
         <Panel title="FOREX SIGNAL ENGINE · OPCIONAL">
@@ -370,9 +560,12 @@ function SettingsView({ state, busy, run, patchSettings }: any) {
             <NumberSetting label="Confianza mín." value={settings.forexMinSignalConfidence} min={0} max={100} step={1} suffix="%" onSave={(v: number) => patchSettings({ forexMinSignalConfidence: v })} />
             <NumberSetting label="Rolling WR mín." value={settings.forexMinRollingWinRate} min={0} max={100} step={1} suffix="%" onSave={(v: number) => patchSettings({ forexMinRollingWinRate: v })} />
           </div>
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <Hint>Con 4 pares y 20 min son ~576 créditos/día. Puedes dejar este módulo pendiente mientras pruebas Binance.</Hint>
-            <PrimaryButton onClick={() => void saveSymbols()}>Guardar pares</PrimaryButton>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <Hint>Con 4 pares y 20 min son ~576 créditos/día. "Escanear ahora" sirve para comprobar la conexión sin esperar al siguiente ciclo.</Hint>
+            <div className="flex gap-2">
+              <PrimaryButton onClick={() => void saveSymbols()}>Guardar pares</PrimaryButton>
+              <SecondaryButton disabled={busy || !forexData.configured} onClick={() => run(() => v34Api.runForexScanner(), 'Scanner Forex ejecutado.')}>Escanear ahora</SecondaryButton>
+            </div>
           </div>
         </Panel>
       </section>
@@ -518,7 +711,7 @@ function BacktestResult({ result }: any) {
   );
 }
 
-const emptyMetrics = { trades: 0, winRate: 0, netProfit: 0, profitFactor: 0 };
+const emptyMetrics = { trades: 0, wins: 0, losses: 0, breakeven: 0, winRate: 0, netProfit: 0, profitFactor: 0, expectancy: 0, unrealizedPnl: 0, openTrades: 0, fees: 0 };
 
 function statusOf(items: any[], provider: IntegrationProvider): any {
   return items.find((item) => item.provider === provider) || { provider, configured: false };
@@ -529,6 +722,10 @@ const Nav = ({ active, children, onClick }: any) => <button onClick={onClick} cl
 
 function Metric({ title, value, tone }: any) {
   return <div className="bg-[#0d1117] border border-slate-800 rounded-2xl p-4"><p className="text-[7px] uppercase tracking-widest font-black text-slate-600">{title}</p><p className={`mt-2 text-xl font-black ${tone === 'green' ? 'text-emerald-400' : tone === 'red' ? 'text-rose-400' : 'text-white'}`}>{value}</p></div>;
+}
+
+function MiniMetric({ label, value, tone }: any) {
+  return <div className="rounded-xl border border-slate-800 bg-black/30 p-3"><p className="text-[7px] uppercase tracking-wider font-black text-slate-600">{label}</p><p className={`mt-1 text-sm font-black ${tone === 'green' ? 'text-emerald-400' : tone === 'red' ? 'text-rose-400' : 'text-white'}`}>{value}</p></div>;
 }
 
 function MarketPanel({ title, subtitle, accent, children }: any) {
@@ -545,12 +742,12 @@ function Block({ title, children }: any) {
 
 function ScannerLine({ scanner }: any) {
   if (!scanner) return <div className="text-[8px] text-slate-600">Scanner inicializando…</div>;
-  return <div className="flex flex-wrap gap-3 rounded-xl bg-black/30 border border-slate-800 px-3 py-2 text-[8px] uppercase tracking-widest text-slate-500"><span className="text-white font-black">{scanner.status || '—'}</span>{scanner.current && <span>{scanner.current}</span>}{scanner.total != null && <span>{scanner.scanned || 0}/{scanner.total}</span>}{scanner.sent != null && <span>sent {scanner.sent}</span>}{scanner.nextScanMinutes && <span>next ~{scanner.nextScanMinutes}m</span>}</div>;
+  return <div className="flex flex-wrap gap-3 rounded-xl bg-black/30 border border-slate-800 px-3 py-2 text-[8px] uppercase tracking-widest text-slate-500"><span className="text-white font-black">{scanner.status || '—'}</span>{scanner.current && <span>{scanner.current}</span>}{scanner.total != null && <span>{scanner.scanned || 0}/{scanner.total}</span>}{scanner.signals != null && <span>setups {scanner.signals}</span>}{scanner.qualified != null && <span>qualified {scanner.qualified}</span>}{scanner.sent != null && <span>sent {scanner.sent}</span>}{scanner.errors != null && scanner.errors > 0 && <span className="text-rose-400">errors {scanner.errors}</span>}{scanner.nextScanMinutes && <span>next ~{scanner.nextScanMinutes}m</span>}</div>;
 }
 
-function PositionTable({ rows }: any) {
+function PositionTable({ rows, paper = false, busy = false, onClose }: any) {
   if (!rows.length) return <Empty text="Sin posiciones abiertas" />;
-  return <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-[9px]"><thead className="text-slate-600 uppercase"><tr><th className="p-3 text-left">Coin</th><th>Side</th><th>Lev</th><th>Entry</th><th>SL</th><th>TP</th><th>PnL</th><th>Estado</th></tr></thead><tbody>{rows.map((r: any) => <tr key={r.id} className="border-t border-slate-900"><td className="p-3 text-white font-black">{r.symbol}</td><td className={`text-center font-black ${r.side === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}`}>{r.side}</td><td className="text-center">{r.leverage || '—'}x</td><td className="text-center">{price(r.entryPrice)}</td><td className="text-center text-rose-300">{price(r.stopLoss)}</td><td className="text-center text-emerald-300">{price(r.takeProfit)}</td><td className="text-center">{money(r.unrealizedPnl)}</td><td className="text-center text-slate-500">{r.state}</td></tr>)}</tbody></table></div>;
+  return <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-[9px]"><thead className="text-slate-600 uppercase"><tr><th className="p-3 text-left">Coin</th><th>Side</th><th>Lev</th><th>Entry</th><th>SL</th><th>TP</th><th>PnL flotante</th><th>Estado</th>{paper && <th>Acción</th>}</tr></thead><tbody>{rows.map((r: any) => <tr key={r.id} className="border-t border-slate-900"><td className="p-3 text-white font-black">{r.symbol}</td><td className={`text-center font-black ${r.side === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}`}>{r.side}</td><td className="text-center">{r.leverage || '—'}x</td><td className="text-center">{price(r.entryPrice)}</td><td className="text-center text-rose-300">{price(r.stopLoss)}</td><td className="text-center text-emerald-300">{price(r.takeProfit)}</td><td className={`text-center font-black ${Number(r.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{money(r.unrealizedPnl)}</td><td className="text-center text-slate-500">{r.state}</td>{paper && <td className="text-center"><button disabled={busy} onClick={() => onClose?.(r.id)} className="px-2 py-1 rounded-lg border border-amber-700 text-amber-300 disabled:opacity-40">Cerrar</button></td>}</tr>)}</tbody></table></div>;
 }
 
 function OpportunityTable({ rows }: any) {
@@ -565,12 +762,12 @@ function ForexSignalTable({ rows }: any) {
 
 function TradeHistory({ rows }: any) {
   if (!rows.length) return <Empty text="Sin historial" />;
-  return <div className="overflow-x-auto max-h-[340px] overflow-y-auto"><table className="w-full min-w-[720px] text-[9px]"><thead className="text-slate-600 uppercase sticky top-0 bg-[#080c12]"><tr><th className="p-3 text-left">Coin</th><th>Side</th><th>Estado</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Cierre</th></tr></thead><tbody>{rows.map((r: any) => <tr key={r.id} className="border-t border-slate-900"><td className="p-3 text-white font-black">{r.symbol}</td><td className="text-center">{r.side}</td><td className="text-center text-slate-500">{r.state}</td><td className="text-center">{price(r.entryPrice)}</td><td className="text-center">{price(r.exitPrice)}</td><td className={`text-center font-black ${Number(r.realizedPnl || r.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{money(r.state === 'CLOSED' ? r.realizedPnl : r.unrealizedPnl)}</td><td className="text-center text-slate-600">{r.closeReason || '—'}</td></tr>)}</tbody></table></div>;
+  return <div className="overflow-x-auto max-h-[420px] overflow-y-auto"><table className="w-full min-w-[900px] text-[9px]"><thead className="text-slate-600 uppercase sticky top-0 bg-[#080c12]"><tr><th className="p-3 text-left">Coin</th><th>Modo</th><th>Side</th><th>Estado</th><th>Entry</th><th>Exit</th><th>PnL bruto</th><th>Fees</th><th>PnL neto</th><th>Cierre</th></tr></thead><tbody>{rows.map((r: any) => { const net = tradeNetPnl(r); return <tr key={r.id} className="border-t border-slate-900"><td className="p-3 text-white font-black">{r.symbol}</td><td className="text-center text-slate-500">{r.executionMode || '—'}</td><td className="text-center">{r.side}</td><td className="text-center text-slate-500">{r.state}</td><td className="text-center">{price(r.entryPrice)}</td><td className="text-center">{price(r.exitPrice)}</td><td className="text-center">{money(r.state === 'CLOSED' ? r.realizedPnl : r.unrealizedPnl)}</td><td className="text-center text-amber-300">{money(r.commission)}</td><td className={`text-center font-black ${net >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{money(net)}</td><td className="text-center text-slate-600">{r.closeReason || '—'}</td></tr>; })}</tbody></table></div>;
 }
 
 function IntegrationCard({ title, status, description, children }: any) {
   const ok = status.configured && status.lastTestOk === true;
-  return <Panel title={title}><div className="flex items-center justify-between mb-4"><p className="text-[9px] text-slate-500">{description}</p><span className={`px-2 py-1 rounded-lg text-[7px] uppercase font-black ${ok ? 'bg-emerald-500/10 text-emerald-400' : status.configured ? 'bg-amber-500/10 text-amber-400' : 'bg-slate-800 text-slate-500'}`}>{ok ? 'Conectado' : status.configured ? 'Revisar' : 'No configurado'}</span></div>{status.maskedPrimary && <div className="mb-3 text-[8px] text-slate-600">Guardado: <span className="text-slate-400">{status.maskedPrimary}</span></div>}<div className="space-y-3">{children}</div></Panel>;
+  return <Panel title={title}><div className="flex items-center justify-between mb-4"><p className="text-[9px] text-slate-500">{description}</p><span className={`px-2 py-1 rounded-lg text-[7px] uppercase font-black ${ok ? 'bg-emerald-500/10 text-emerald-400' : status.configured ? 'bg-amber-500/10 text-amber-400' : 'bg-slate-800 text-slate-500'}`}>{ok ? 'Conectado' : status.configured ? 'Revisar' : 'No configurado'}</span></div>{status.maskedPrimary && <div className="mb-3 text-[8px] text-slate-600">Guardado: <span className="text-slate-400">{status.maskedPrimary}</span></div>}{status.lastError && <div className="mb-3 rounded-xl border border-rose-500/20 bg-rose-500/5 p-2 text-[8px] text-rose-300">{status.lastError}</div>}<div className="space-y-3">{children}</div></Panel>;
 }
 
 function IntegrationActions({ busy, configured, save, test, remove }: any) {
@@ -596,7 +793,7 @@ function ToggleSetting({ label, checked, onChange }: any) {
   return <button onClick={() => void onChange(!checked)} className={`rounded-2xl border p-3 text-left ${checked ? 'border-emerald-600/40 bg-emerald-500/5' : 'border-slate-800 bg-black/30'}`}><p className="field-label">{label}</p><p className={`mt-2 text-sm font-black ${checked ? 'text-emerald-400' : 'text-slate-600'}`}>{checked ? 'ACTIVO' : 'OFF'}</p></button>;
 }
 
-const InfoBox = ({ label, value }: any) => <div className="rounded-2xl border border-slate-800 bg-black/30 p-3"><p className="field-label">{label}</p><p className="mt-2 text-sm text-white font-black">{value}</p></div>;
+const InfoBox = ({ label, value }: any) => <div className="rounded-2xl border border-slate-800 bg-black/30 p-3"><p className="field-label">{label}</p><p className="mt-2 text-sm text-white font-black break-words">{value}</p></div>;
 const Hint = ({ children }: any) => <div className="rounded-xl bg-slate-900/60 border border-slate-800 p-3 text-[8px] text-slate-500 leading-5 flex-1">{children}</div>;
 const Banner = ({ tone, children }: any) => <div className={`rounded-2xl border px-4 py-3 text-[10px] ${tone === 'error' ? 'border-rose-500/30 bg-rose-500/10 text-rose-300' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'}`}>{children}</div>;
 const Empty = ({ text }: any) => <div className="py-8 text-center text-[8px] uppercase tracking-widest text-slate-700">{text}</div>;
@@ -612,6 +809,10 @@ function DateField({ label, value, set }: any) {
   return <label><span className="field-label">{label}</span><input className="field mt-1" type="date" value={value} onChange={(e) => set(e.target.value)} /></label>;
 }
 
+function tradeNetPnl(trade: any): number {
+  if (trade?.state !== 'CLOSED') return Number(trade?.unrealizedPnl || 0);
+  return Number(trade?.realizedPnl || 0) - Number(trade?.commission || 0) + Number(trade?.fundingOrSwap || 0);
+}
 function money(value: any): string { const n = Number(value || 0); return `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(2)}`; }
 function pct(value: any): string { return `${Number(value || 0).toFixed(1)}%`; }
 function factor(value: any): string { return value == null ? '∞' : Number(value || 0).toFixed(2); }
