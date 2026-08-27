@@ -1,0 +1,30 @@
+name: R10 Benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - 'backend/src/strategyModelR10.ts'
+      - 'backend/src/analysisV335.ts'
+      - 'backend/src/universeAuditCore.ts'
+      - 'backend/src/r10Benchmark.ts'
+      - '.github/workflows/r10-benchmark.yml'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm install
+      - run: npx tsx src/r10Benchmark.ts
