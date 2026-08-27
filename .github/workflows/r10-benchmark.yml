@@ -24,7 +24,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
       - run: npm install
       - run: npx tsx src/r10Benchmark.ts
