@@ -7,6 +7,12 @@ const envSchema = z.object({
   APP_MODE: z.enum(['PAPER', 'TESTNET', 'REAL']).default('PAPER'),
   DB_PATH: z.string().default('./data/trading-v34.sqlite'),
 
+  DEFAULT_WORKSPACE_ID: z.string().min(1).max(128).default('default'),
+  INTEGRATION_MASTER_KEY: z.string().default(''),
+  LOCAL_VAULT_KEY_PATH: z.string().default('./data/.integration-vault-key'),
+
+  // Legacy server-level credentials are kept only as migration fallback.
+  // New credentials should be stored per workspace through /api/integrations.
   BINANCE_API_KEY: z.string().default(''),
   BINANCE_API_SECRET: z.string().default(''),
   BINANCE_BASE_URL: z.string().url().default('https://fapi.binance.com'),
