@@ -1,10 +1,10 @@
 import { BinanceMarketDataClient } from './binanceMarket.js';
 import { TradingDatabase } from './database.js';
 import { auditV335Symbol, defaultAuditRules, type SymbolAuditResult } from './universeAuditCore.js';
-import type { EngineSettings } from './types.js';
 
 const DAY = 24 * 60 * 60_000;
 const ERROR_BACKOFF_MS = 15 * 60_000;
+const AUDIT_MODEL = 'V33.5_STRUCTURAL_PRICE_LEVELS';
 
 export interface UniverseAuditState {
   status: 'IDLE' | 'RUNNING' | 'COMPLETED' | 'ERROR';
@@ -32,7 +32,6 @@ export class UniverseQualificationService {
   constructor(
     private readonly database: TradingDatabase,
     private readonly market: BinanceMarketDataClient,
-    private readonly getSettings: () => EngineSettings,
   ) {}
 
   getState(): UniverseAuditState {
@@ -43,18 +42,14 @@ export class UniverseQualificationService {
   }
 
   getQualifiedSymbols(): string[] {
-    const state = this.getState();
-    return state.status === 'COMPLETED' ? (state.qualifiedSymbols ?? []) : [];
+    return this.getState().qualifiedSymbols ?? [];
   }
 
   shouldRefresh(maxAgeDays = 7): boolean {
     if (this.running) return false;
     const state = this.getState();
-    const settings = this.getSettings();
-    const rules = state.rules ?? {};
-    const ruleMismatch = Number(rules.minStopPricePct ?? NaN) !== Number(settings.cryptoMinStopPricePct)
-      || Number(rules.minTakeProfitPricePct ?? NaN) !== Number(settings.cryptoMinTakeProfitPricePct);
-    if (ruleMismatch) return true;
+    const modelMismatch = String(state.rules?.exitModel ?? '') !== AUDIT_MODEL;
+    if (modelMismatch) return true;
     if (state.status === 'COMPLETED' && state.completedAt) {
       return Date.now() - state.completedAt > maxAgeDays * DAY;
     }
@@ -74,11 +69,7 @@ export class UniverseQualificationService {
     this.running = true;
     const endTime = Date.now() - 60_000;
     const startTime = endTime - Math.max(3, Math.min(31, days)) * DAY;
-    const settings = this.getSettings();
-    const rules = defaultAuditRules(startTime, endTime, {
-      minStopPricePct: settings.cryptoMinStopPricePct,
-      minTakeProfitPricePct: settings.cryptoMinTakeProfitPricePct,
-    });
+    const rules = defaultAuditRules(startTime, endTime);
     const results: SymbolAuditResult[] = [];
     const errors: Array<{ symbol: string; error: string }> = [];
     const startedAt = Date.now();
@@ -98,24 +89,20 @@ export class UniverseQualificationService {
         qualifiedSymbols: [], results: [], errors: [], rules: { ...rules, days },
       });
 
-      const chunkSize = 1;
-      for (let i = 0; i < symbols.length; i += chunkSize) {
-        const chunk = symbols.slice(i, i + chunkSize);
-        const settled = await Promise.allSettled(chunk.map(async (symbol) => {
+      // Serialized historical retrieval protects Binance request-weight headroom.
+      for (let i = 0; i < symbols.length; i++) {
+        const symbol = symbols[i];
+        try {
           const { ltf, htf } = await this.market.getDualHistoricalRange(symbol, startTime, endTime);
-          return auditV335Symbol(symbol, ltf, htf, rules);
-        }));
-
-        settled.forEach((item, index) => {
-          const symbol = chunk[index];
-          if (item.status === 'fulfilled') results.push(item.value);
-          else errors.push({ symbol, error: item.reason instanceof Error ? item.reason.message : String(item.reason) });
-        });
+          results.push(auditV335Symbol(symbol, ltf, htf, rules));
+        } catch (error) {
+          errors.push({ symbol, error: error instanceof Error ? error.message : String(error) });
+        }
 
         const compact = compactResults(results);
         this.save({
-          status: 'RUNNING', startedAt, total: symbols.length, completed: Math.min(symbols.length, i + chunk.length),
-          current: chunk.at(-1), qualifiedSymbols: compact.filter((r) => r.qualified).map((r) => r.symbol),
+          status: 'RUNNING', startedAt, total: symbols.length, completed: i + 1,
+          current: symbol, qualifiedSymbols: compact.filter((r) => r.qualified).map((r) => r.symbol),
           results: compact, errors: errors.slice(-100), rules: { ...rules, days },
         });
       }
@@ -134,6 +121,9 @@ export class UniverseQualificationService {
         status: 'ERROR', startedAt, completedAt: Date.now(),
         error: error instanceof Error ? error.message : String(error),
         qualifiedSymbols: previous.qualifiedSymbols ?? [],
+        results: previous.results ?? [],
+        errors: previous.errors ?? [],
+        rules: previous.rules ?? { exitModel: AUDIT_MODEL },
       };
       this.save(state);
       throw error;
