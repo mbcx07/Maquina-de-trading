@@ -59,6 +59,12 @@ export class PaperBrokerService {
   }
 
   async runOnce(): Promise<void> {
+    // PAPER is a separate simulated account. Freeze it whenever the operator changes
+    // to TESTNET/REAL so it can never consume prices from the wrong market environment.
+    if (this.getSettings().appMode !== 'PAPER') {
+      this.saveEngineState('paperBroker', { status: 'PAUSED_MODE', updatedAt: Date.now() });
+      return;
+    }
     if (this.running) return;
     this.running = true;
     try {
@@ -96,6 +102,7 @@ export class PaperBrokerService {
   }
 
   async closeTradeManually(tradeId: string): Promise<TradeRecord> {
+    if (this.getSettings().appMode !== 'PAPER') throw new Error('SWITCH_TO_PAPER_TO_CLOSE_PAPER_TRADE');
     const trade = this.database.getRecentTrades(50_000).find((item) => item.id === tradeId);
     if (!trade || trade.executionMode !== 'PAPER' || trade.broker !== 'BINANCE') {
       throw new Error('PAPER_TRADE_NOT_FOUND');
