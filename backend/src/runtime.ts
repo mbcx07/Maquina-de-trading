@@ -42,7 +42,7 @@ const repository = new TradingRepository(database);
 const telegram = new TelegramService(() => vault.getTelegram(workspaceId));
 const binance = new BinanceUsdmClient(getSettings, () => vault.getBinance(workspaceId));
 const binanceMarket = new BinanceMarketDataClient(getSettings);
-const mt5 = new Mt5BridgeClient(getSettings);
+const mt5 = new Mt5BridgeClient(getSettings, () => vault.getMt5(workspaceId));
 const cryptoExecution = new CryptoExecutionService(database, repository, binance, telegram, getSettings);
 const forexExecution = new ForexExecutionService(database, repository, mt5, telegram, getSettings);
 const orchestrator = new OpportunityOrchestrator(database, repository, cryptoExecution, forexExecution, getSettings);
@@ -51,7 +51,7 @@ const riskGuard = new PortfolioRiskGuard(database, telegram, getSettings);
 const cryptoScanner = new CryptoMarketScanner(database, binanceMarket, orchestrator, getSettings);
 const forexScanner = new ForexMarketScanner(database, mt5, orchestrator, getSettings);
 
-app.use('/api/integrations', createIntegrationRouter(vault, getSettings));
+app.use('/api/integrations', createIntegrationRouter(vault, getSettings, () => workspaceId));
 
 const opportunitySchema = z.object({
   id: z.string().min(1), signalId: z.string().min(1), signalFingerprint: z.string().min(1),
@@ -102,6 +102,7 @@ app.get('/api/state', async (_req, res) => {
     const integrationStatuses = vault.getStatus(workspaceId);
     const binanceIntegration = integrationStatuses.find((item) => item.provider === 'BINANCE');
     const telegramIntegration = integrationStatuses.find((item) => item.provider === 'TELEGRAM');
+    const mt5Integration = integrationStatuses.find((item) => item.provider === 'MT5');
 
     const brokerStatus: Record<string, unknown> = {
       telegram: {
@@ -114,21 +115,36 @@ app.get('/api/state', async (_req, res) => {
         connected: binanceIntegration?.lastTestOk === true,
         masked: binanceIntegration?.maskedPrimary,
       },
-      mt5: { configured: Boolean(env.MT5_BRIDGE_URL) },
+      mt5: {
+        configured: Boolean(vault.getMt5(workspaceId) || env.MT5_BRIDGE_URL),
+        connected: mt5Integration?.lastTestOk === true,
+        masked: mt5Integration?.maskedPrimary,
+      },
     };
 
-    if (settings.appMode !== 'PAPER') {
-      const checks: PromiseSettledResult<unknown>[] = await Promise.allSettled([
-        binance.hasCredentials() ? binance.getPositions() : Promise.reject(new Error('BINANCE_NOT_CONFIGURED')),
-        mt5.health(),
-      ]);
-      const [binanceStatus, mt5Status] = checks;
+    const checks: PromiseSettledResult<unknown>[] = await Promise.allSettled([
+      settings.appMode !== 'PAPER' && settings.cryptoEnabled
+        ? (binance.hasCredentials() ? binance.getPositions() : Promise.reject(new Error('BINANCE_NOT_CONFIGURED')))
+        : Promise.resolve([]),
+      settings.forexEnabled ? mt5.health() : Promise.resolve(null),
+    ]);
+    const [binanceStatus, mt5Status] = checks;
+
+    if (settings.appMode !== 'PAPER' && settings.cryptoEnabled) {
       brokerStatus.binance = binanceStatus.status === 'fulfilled'
         ? { configured: true, connected: true, openPositions: (binanceStatus.value as any[]).length, masked: binanceIntegration?.maskedPrimary }
         : { configured: binance.hasCredentials(), connected: false, error: String(binanceStatus.reason), masked: binanceIntegration?.maskedPrimary };
+    }
+
+    if (settings.forexEnabled) {
       brokerStatus.mt5 = mt5Status.status === 'fulfilled'
-        ? { configured: true, connected: true, account: (mt5Status.value as any).account }
-        : { configured: true, connected: false, error: String(mt5Status.reason) };
+        ? { configured: true, connected: true, account: (mt5Status.value as any).account, masked: mt5Integration?.maskedPrimary }
+        : {
+            configured: Boolean(vault.getMt5(workspaceId) || env.MT5_BRIDGE_URL),
+            connected: false,
+            error: String(mt5Status.reason),
+            masked: mt5Integration?.maskedPrimary,
+          };
     }
 
     res.json({
@@ -175,12 +191,35 @@ app.patch('/api/settings', (req, res) => {
 
 app.post('/api/engine/start', async (_req, res) => {
   try {
+    const settings = getSettings();
     const status = await riskGuard.evaluate();
     if (status.status === 'TRIPPED') return res.status(409).json({ error: 'RISK_KILL_SWITCH_TRIPPED', riskGuard: status });
-    if (getSettings().appMode !== 'PAPER' && !binance.hasCredentials()) {
-      return res.status(409).json({ error: 'BINANCE_CREDENTIALS_REQUIRED_FOR_LIVE_MODE' });
+
+    if (settings.appMode !== 'PAPER' && settings.cryptoEnabled && !binance.hasCredentials()) {
+      return res.status(409).json({ error: 'BINANCE_CREDENTIALS_REQUIRED_FOR_CRYPTO' });
     }
-    database.saveSettings({ ...getSettings(), engineEnabled: true });
+
+    if (settings.forexEnabled) {
+      try {
+        const health = await mt5.health();
+        if (!health.account.tradeAllowed || !health.account.tradeExpert) {
+          return res.status(409).json({
+            error: 'MT5_AUTOTRADING_NOT_ALLOWED',
+            account: health.account,
+          });
+        }
+        if (settings.forexMaxEntriesPerSymbol !== 1 && !health.account.hedging) {
+          return res.status(409).json({
+            error: 'MT5_HEDGING_REQUIRED_FOR_RETESTS',
+            account: health.account,
+          });
+        }
+      } catch (error) {
+        return res.status(409).json({ error: 'MT5_BRIDGE_CONNECTION_REQUIRED', detail: errorMessage(error) });
+      }
+    }
+
+    database.saveSettings({ ...settings, engineEnabled: true });
     res.json({ ok: true, engineEnabled: true });
   } catch (error) {
     res.status(500).json({ error: errorMessage(error) });
