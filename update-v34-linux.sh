@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BRANCH="feature/v34-dual-market-engine"
+COMPOSE="docker-compose.linux.yml"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+echo "== Quantum Dual V34 updater =="
+echo "Repo: $ROOT"
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "ERROR: el repositorio tiene cambios locales. No haré reset para no borrarlos."
+  git status --short
+  exit 2
+fi
+
+echo "[1/6] Descargando rama correcta..."
+git fetch origin "$BRANCH"
+git checkout "$BRANCH"
+git reset --hard "origin/$BRANCH"
+COMMIT="$(git rev-parse --short HEAD)"
+echo "Commit desplegado: $COMMIT"
+
+echo "[2/6] Reconstruyendo SIN cache..."
+sudo docker compose -f "$COMPOSE" build --no-cache backend frontend
+
+echo "[3/6] Recreando contenedores sin borrar el volumen SQLite..."
+sudo docker compose -f "$COMPOSE" up -d --force-recreate --remove-orphans
+
+echo "[4/6] Estado Docker:"
+sudo docker compose -f "$COMPOSE" ps
+
+echo "[5/6] Verificando backend..."
+for i in {1..30}; do
+  if curl -fsS http://127.0.0.1:8080/backend/health >/tmp/v34-health.json 2>/dev/null; then
+    cat /tmp/v34-health.json
+    echo
+    break
+  fi
+  sleep 1
+done
+
+echo "[6/6] Verificando release servido por el frontend..."
+if curl -fsS -H 'Cache-Control: no-cache' "http://127.0.0.1:8080/release.txt?ts=$(date +%s)"; then
+  echo
+else
+  echo "ERROR: release.txt no está disponible. El frontend nuevo no quedó desplegado."
+  exit 3
+fi
+
+echo
+echo "OK. Abre/recarga http://127.0.0.1:8080 y verifica que release.txt indique 2026.08.27-R3."
