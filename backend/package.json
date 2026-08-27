@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "tsx watch src/linuxRuntime.ts",
     "start": "tsx src/linuxRuntime.ts",
-    "start:legacy": "tsx src/runtime.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "selftest": "tsx src/selftest.ts"
