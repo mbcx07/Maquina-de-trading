@@ -31,8 +31,10 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    # Security default: do not expose trading controls directly to the Internet.
+    # Reach it through an SSH tunnel or a private VPN such as Tailscale.
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
 
 volumes:
   v34_data:
