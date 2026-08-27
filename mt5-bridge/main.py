@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from typing import Literal, Optional
 
@@ -18,7 +19,16 @@ PASSWORD = os.getenv("MT5_PASSWORD", "").strip()
 SERVER = os.getenv("MT5_SERVER", "").strip()
 TERMINAL_PATH = os.getenv("MT5_TERMINAL_PATH", "").strip()
 
-app = FastAPI(title="Maquina Trading V34 MT5 Bridge", version="0.1.0")
+app = FastAPI(title="Maquina Trading V34 MT5 Bridge", version="0.2.0")
+
+
+class SizeRequest(BaseModel):
+    symbol: str = Field(min_length=1)
+    side: Literal["BUY", "SELL"]
+    entry: float = Field(gt=0)
+    sl: float = Field(gt=0)
+    percent: float = Field(gt=0, le=100)
+    mode: Literal["RISK_TO_SL", "MARGIN_PERCENT"] = "RISK_TO_SL"
 
 
 class OrderRequest(BaseModel):
@@ -119,6 +129,30 @@ def choose_filling_modes():
     return modes
 
 
+def normalize_volume(raw_volume: float, symbol_info) -> float:
+    minimum = float(symbol_info.volume_min)
+    maximum = float(symbol_info.volume_max)
+    step = float(symbol_info.volume_step)
+    if step <= 0:
+        raise HTTPException(status_code=400, detail="Invalid MT5 volume_step")
+
+    volume = math.floor(raw_volume / step) * step
+    if volume < minimum:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "MT5_MIN_VOLUME_NOT_MET",
+                "calculatedVolume": raw_volume,
+                "minimumVolume": minimum,
+                "volumeStep": step,
+            },
+        )
+    volume = min(volume, maximum)
+
+    precision = max(0, int(round(-math.log10(step)))) if step < 1 else 0
+    return round(volume, precision)
+
+
 @app.get("/health", dependencies=[Depends(authorize)])
 def health():
     account = account_snapshot()
@@ -137,6 +171,54 @@ def positions(symbol: Optional[str] = None):
     if rows is None:
         raise HTTPException(status_code=503, detail={"error": "MT5_POSITIONS_GET_FAILED", "last_error": mt5.last_error()})
     return [serialize_position(row) for row in rows]
+
+
+@app.post("/size", dependencies=[Depends(authorize)])
+def calculate_size(req: SizeRequest):
+    ensure_mt5()
+    account = account_snapshot()
+    symbol = req.symbol.strip().upper()
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        raise HTTPException(status_code=400, detail=f"Unknown MT5 symbol: {symbol}")
+
+    order_type = mt5.ORDER_TYPE_BUY if req.side == "BUY" else mt5.ORDER_TYPE_SELL
+    capital_target = account["balance"] * (req.percent / 100.0)
+
+    if req.mode == "RISK_TO_SL":
+        loss_for_one_lot = mt5.order_calc_profit(order_type, symbol, 1.0, req.entry, req.sl)
+        if loss_for_one_lot is None:
+            raise HTTPException(status_code=422, detail={"error": "MT5_ORDER_CALC_PROFIT_FAILED", "last_error": mt5.last_error()})
+        loss_for_one_lot = abs(float(loss_for_one_lot))
+        if loss_for_one_lot <= 0:
+            raise HTTPException(status_code=422, detail="Stop loss produces zero calculated risk")
+        raw_volume = capital_target / loss_for_one_lot
+        basis = loss_for_one_lot
+    else:
+        margin_for_one_lot = mt5.order_calc_margin(order_type, symbol, 1.0, req.entry)
+        if margin_for_one_lot is None:
+            raise HTTPException(status_code=422, detail={"error": "MT5_ORDER_CALC_MARGIN_FAILED", "last_error": mt5.last_error()})
+        margin_for_one_lot = abs(float(margin_for_one_lot))
+        if margin_for_one_lot <= 0:
+            raise HTTPException(status_code=422, detail="Calculated margin is zero")
+        raw_volume = capital_target / margin_for_one_lot
+        basis = margin_for_one_lot
+
+    volume = normalize_volume(raw_volume, info)
+    return {
+        "symbol": symbol,
+        "mode": req.mode,
+        "percent": req.percent,
+        "balance": account["balance"],
+        "capitalTarget": capital_target,
+        "rawVolume": raw_volume,
+        "volume": volume,
+        "volumeMin": float(info.volume_min),
+        "volumeMax": float(info.volume_max),
+        "volumeStep": float(info.volume_step),
+        "basisPerLot": basis,
+        "hedging": account["hedging"],
+    }
 
 
 @app.post("/order", dependencies=[Depends(authorize)])
@@ -158,6 +240,7 @@ def open_order(order: OrderRequest):
             detail="MT5 account is NETTING. Multiple independent positions on the same symbol require HEDGING mode.",
         )
 
+    volume = normalize_volume(float(order.volume), info)
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
         raise HTTPException(status_code=503, detail={"error": "MT5_TICK_FAILED", "last_error": mt5.last_error()})
@@ -169,7 +252,7 @@ def open_order(order: OrderRequest):
     base_request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
-        "volume": float(order.volume),
+        "volume": volume,
         "type": order_type,
         "price": price,
         "sl": float(order.sl),
@@ -191,7 +274,6 @@ def open_order(order: OrderRequest):
             continue
 
         check_dict = check._asdict()
-        # 0 means request validation accepted by the terminal/server.
         if int(check_dict.get("retcode", -1)) != 0:
             continue
 
@@ -216,7 +298,7 @@ def open_order(order: OrderRequest):
                 "order": int(result_dict.get("order", 0)),
                 "deal": int(result_dict.get("deal", 0)),
                 "price": float(result_dict.get("price", price)),
-                "volume": float(result_dict.get("volume", order.volume)),
+                "volume": float(result_dict.get("volume", volume)),
                 "retcode": int(result_dict.get("retcode", 0)),
                 "comment": result_dict.get("comment", ""),
                 "hedging": account["hedging"],
