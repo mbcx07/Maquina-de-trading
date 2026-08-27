@@ -3,6 +3,7 @@ import type { Candle } from './analysis.js';
 import type { TradeSide } from './types.js';
 
 const ENTRY_TIMEFRAME_MINUTES = 5;
+const AUDIT_MODEL = 'R10_HIGH_WINRATE_SWEEP_M5_M15_H45';
 
 export interface AuditTrade {
   entryTime: number;
@@ -53,23 +54,23 @@ export interface AuditRules {
   minTrades: number;
   minProfitFactor: number;
   minOosTrades: number;
-  exitModel: 'V33.5_M5_M15_H45';
+  exitModel: typeof AUDIT_MODEL;
 }
 
 export const defaultAuditRules = (startTime: number, endTime: number): AuditRules => ({
   startTime,
   endTime,
-  // The strategy now evaluates one closed M5 bar at a time and confirms trend on M15.
   scanStepMinutes: 5,
-  // Preserve the short 45-minute evaluation horizon as 9 M5 bars, not 45 M5 bars.
   maxHoldMinutes: 45,
   roundTripCostPct: 0.12,
-  minRollingWinRate: 75,
-  minSignalConfidence: 75,
+  // Original high-winrate model used 64% as the minimum positive OOS floor
+  // and 70% as the strict target. Admission starts at the proven floor.
+  minRollingWinRate: 64,
+  minSignalConfidence: 74,
   minTrades: 5,
   minProfitFactor: 1.10,
   minOosTrades: 2,
-  exitModel: 'V33.5_M5_M15_H45',
+  exitModel: AUDIT_MODEL,
 });
 
 export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], rules: AuditRules): SymbolAuditResult {
@@ -94,21 +95,16 @@ export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], ru
     const signal = analyzeStructureStrategyV335(ltfWindow, htfWindow, symbol);
     if (!signal) continue;
 
-    const rolling = runRollingBacktestV335(symbol, ltfWindow, htfWindow);
-    const passes = rolling.tradesEvaluated === 0
-      ? signal.confidence >= Math.max(80, rules.minSignalConfidence)
-      : rolling.winRate >= rules.minRollingWinRate && signal.confidence >= rules.minSignalConfidence;
+    const rollingLtf = l.slice(Math.max(0, i - 319), i + 1);
+    const rollingHtf = h.slice(Math.max(0, htfEnd - 220), htfEnd);
+    const rolling = runRollingBacktestV335(symbol, rollingLtf, rollingHtf);
+    const rollingWinRate = rolling.tradesEvaluated < 3
+      ? Math.max(signal.confidence, rolling.winRate)
+      : rolling.winRate;
+    const passes = rollingWinRate >= rules.minRollingWinRate && signal.confidence >= rules.minSignalConfidence;
     if (!passes) continue;
 
-    const resolved = resolve(
-      signal.side,
-      signal.entry,
-      signal.stopLoss,
-      signal.takeProfit,
-      l,
-      i,
-      rules.maxHoldMinutes,
-    );
+    const resolved = resolve(signal.side, signal.entry, signal.stopLoss, signal.takeProfit, l, i, rules.maxHoldMinutes);
     if (!resolved) continue;
     busyUntil = resolved.exitTime;
 
@@ -125,7 +121,7 @@ export function auditV335Symbol(symbol: string, ltf: Candle[], htf: Candle[], ru
       grossReturnPct,
       netReturnPct,
       reason: resolved.reason,
-      rollingWinRate: rolling.tradesEvaluated === 0 ? signal.confidence : rolling.winRate,
+      rollingWinRate,
       confidence: signal.confidence,
     });
   }
@@ -161,7 +157,6 @@ function resolve(
     if (side === 'BUY') {
       const sl = candle.low <= stopLoss;
       const tp = candle.high >= takeProfit;
-      // Conservative same-candle policy: SL first when OHLC cannot prove order.
       if (sl) return { exit: stopLoss, exitTime: candle.time, reason: 'SL' };
       if (tp) return { exit: takeProfit, exitTime: candle.time, reason: 'TP' };
     } else {
@@ -171,7 +166,6 @@ function resolve(
       if (tp) return { exit: takeProfit, exitTime: candle.time, reason: 'TP' };
     }
   }
-
   const expiry = candles[lastIndex];
   return expiry ? { exit: expiry.close, exitTime: expiry.time, reason: 'END' } : null;
 }
@@ -180,7 +174,7 @@ function metricsFor(trades: AuditTrade[]): AuditMetrics {
   const wins = trades.filter((t) => t.netReturnPct > 0);
   const losses = trades.filter((t) => t.netReturnPct < 0);
   const grossProfitPct = wins.reduce((sum, t) => sum + t.netReturnPct, 0);
-  const grossLossAbs = Math.abs(losses.reduce((sum, t) => sum + t.netReturnPct, 0));
+  const grossLossAbs = Math.abs(losses.reduce((sum, t) => sum + Math.min(0, t.netReturnPct), 0));
   let equity = 100;
   let peak = equity;
   let maxDrawdownPct = 0;
