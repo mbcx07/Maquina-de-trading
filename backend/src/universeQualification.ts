@@ -1,6 +1,7 @@
 import { BinanceMarketDataClient } from './binanceMarket.js';
 import { TradingDatabase } from './database.js';
 import { auditV335Symbol, defaultAuditRules, type SymbolAuditResult } from './universeAuditCore.js';
+import type { EngineSettings } from './types.js';
 
 const DAY = 24 * 60 * 60_000;
 const ERROR_BACKOFF_MS = 15 * 60_000;
@@ -31,6 +32,7 @@ export class UniverseQualificationService {
   constructor(
     private readonly database: TradingDatabase,
     private readonly market: BinanceMarketDataClient,
+    private readonly getSettings: () => EngineSettings,
   ) {}
 
   getState(): UniverseAuditState {
@@ -48,6 +50,11 @@ export class UniverseQualificationService {
   shouldRefresh(maxAgeDays = 7): boolean {
     if (this.running) return false;
     const state = this.getState();
+    const settings = this.getSettings();
+    const rules = state.rules ?? {};
+    const ruleMismatch = Number(rules.minStopPricePct ?? NaN) !== Number(settings.cryptoMinStopPricePct)
+      || Number(rules.minTakeProfitPricePct ?? NaN) !== Number(settings.cryptoMinTakeProfitPricePct);
+    if (ruleMismatch) return true;
     if (state.status === 'COMPLETED' && state.completedAt) {
       return Date.now() - state.completedAt > maxAgeDays * DAY;
     }
@@ -67,7 +74,11 @@ export class UniverseQualificationService {
     this.running = true;
     const endTime = Date.now() - 60_000;
     const startTime = endTime - Math.max(3, Math.min(31, days)) * DAY;
-    const rules = defaultAuditRules(startTime, endTime);
+    const settings = this.getSettings();
+    const rules = defaultAuditRules(startTime, endTime, {
+      minStopPricePct: settings.cryptoMinStopPricePct,
+      minTakeProfitPricePct: settings.cryptoMinTakeProfitPricePct,
+    });
     const results: SymbolAuditResult[] = [];
     const errors: Array<{ symbol: string; error: string }> = [];
     const startedAt = Date.now();
@@ -87,9 +98,6 @@ export class UniverseQualificationService {
         qualifiedSymbols: [], results: [], errors: [], rules: { ...rules, days },
       });
 
-      // Historical M1 retrieval is deliberately serialized. A full-market audit is
-      // much heavier than the live scanner and must not consume Binance's entire
-      // IP request-weight budget used by execution/reconciliation on the same VPS.
       const chunkSize = 1;
       for (let i = 0; i < symbols.length; i += chunkSize) {
         const chunk = symbols.slice(i, i + chunkSize);
