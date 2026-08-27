@@ -12,7 +12,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const text = await response.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = text; }
-  if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+  if (!response.ok) throw new Error(data?.error || data?.test?.error || `HTTP ${response.status}`);
   return data as T;
 }
 
@@ -25,4 +25,20 @@ export const v34Api = {
   startEngine: () => request('/api/engine/start', { method: 'POST' }),
   pauseEngine: () => request('/api/engine/pause', { method: 'POST' }),
   emergencyStop: () => request('/api/emergency-stop', { method: 'POST' }),
+
+  getIntegrations: () => request<any>('/api/integrations'),
+  saveBinanceIntegration: (apiKey: string, apiSecret: string) => request<any>('/api/integrations/binance', {
+    method: 'PUT',
+    body: JSON.stringify({ apiKey, apiSecret }),
+  }),
+  saveTelegramIntegration: (botToken: string, chatId: string) => request<any>('/api/integrations/telegram', {
+    method: 'PUT',
+    body: JSON.stringify({ botToken, chatId }),
+  }),
+  testIntegration: (provider: 'binance' | 'telegram') => request<any>(`/api/integrations/${provider}/test`, {
+    method: 'POST',
+  }),
+  removeIntegration: (provider: 'binance' | 'telegram') => request<any>(`/api/integrations/${provider}`, {
+    method: 'DELETE',
+  }),
 };
