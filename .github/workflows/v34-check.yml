@@ -44,9 +44,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Ensure frontend has no embedded private trading/data secrets
+      - name: Ensure active frontend has no embedded private trading/data secrets
         run: |
-          if grep -E 'apiSecret\s*=|BINANCE_API_SECRET\s*=.+[^=[:space:]]|TWELVE_DATA_API_KEY\s*=.+[^=[:space:]]' services/binance.ts App.tsx; then
-            echo 'Potential private credential found in frontend source'
+          if grep -E 'apiSecret\s*=|BINANCE_API_SECRET\s*=.+[^=[:space:]]|TWELVE_DATA_API_KEY\s*=.+[^=[:space:]]' AppR8.tsx services/v34Api.ts App.tsx; then
+            echo 'Potential private credential found in active frontend source'
             exit 1
           fi
