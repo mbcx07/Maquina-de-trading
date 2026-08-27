@@ -12,6 +12,30 @@ export interface BinancePosition {
   leverage: number;
 }
 
+export interface BinanceAccountTrade {
+  symbol: string;
+  id: number;
+  orderId: number;
+  side: TradeSide;
+  price: number;
+  qty: number;
+  realizedPnl: number;
+  commission: number;
+  commissionAsset: string;
+  time: number;
+  buyer: boolean;
+  maker: boolean;
+}
+
+export interface BinanceIncome {
+  symbol: string;
+  incomeType: string;
+  income: number;
+  asset: string;
+  time: number;
+  tranId?: number;
+}
+
 export interface BinanceSymbolMeta {
   symbol: string;
   filters: BinanceSymbolFilters;
@@ -213,6 +237,58 @@ export class BinanceUsdmClient {
       workingType: 'MARK_PRICE',
       clientAlgoId,
       newOrderRespType: 'RESULT',
+    });
+  }
+
+  async getAccountTrades(symbol: string, startTime?: number): Promise<BinanceAccountTrade[]> {
+    const rows = await this.signedRequest<any[]>('/fapi/v1/userTrades', 'GET', {
+      symbol: symbol.toUpperCase(),
+      startTime,
+      limit: 1000,
+    });
+
+    return rows.map((row) => ({
+      symbol: String(row.symbol),
+      id: Number(row.id),
+      orderId: Number(row.orderId),
+      side: String(row.side) as TradeSide,
+      price: Number(row.price ?? 0),
+      qty: Number(row.qty ?? 0),
+      realizedPnl: Number(row.realizedPnl ?? 0),
+      commission: Number(row.commission ?? 0),
+      commissionAsset: String(row.commissionAsset ?? ''),
+      time: Number(row.time ?? 0),
+      buyer: Boolean(row.buyer),
+      maker: Boolean(row.maker),
+    }));
+  }
+
+  async getIncomeHistory(
+    symbol: string,
+    startTime?: number,
+    incomeType?: 'FUNDING_FEE' | 'REALIZED_PNL' | 'COMMISSION',
+  ): Promise<BinanceIncome[]> {
+    const rows = await this.signedRequest<any[]>('/fapi/v1/income', 'GET', {
+      symbol: symbol.toUpperCase(),
+      startTime,
+      incomeType,
+      limit: 1000,
+    });
+
+    return rows.map((row) => ({
+      symbol: String(row.symbol ?? ''),
+      incomeType: String(row.incomeType ?? ''),
+      income: Number(row.income ?? 0),
+      asset: String(row.asset ?? ''),
+      time: Number(row.time ?? 0),
+      tranId: row.tranId == null ? undefined : Number(row.tranId),
+    }));
+  }
+
+  async cancelAllAlgoOpenOrders(symbol: string): Promise<void> {
+    if (this.getSettings().appMode === 'PAPER') return;
+    await this.signedRequest('/fapi/v1/algoOpenOrders', 'DELETE', {
+      symbol: symbol.toUpperCase(),
     });
   }
 }
