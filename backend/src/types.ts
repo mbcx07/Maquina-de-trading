@@ -1,5 +1,6 @@
 export type Broker = 'BINANCE' | 'MT5';
 export type TradeSide = 'BUY' | 'SELL';
+export type AppMode = 'PAPER' | 'TESTNET' | 'REAL';
 export type TradeState =
   | 'PENDING'
   | 'OPENING'
@@ -45,6 +46,7 @@ export interface Opportunity {
 export interface TradeRecord {
   id: string;
   broker: Broker;
+  executionMode?: AppMode;
   symbol: string;
   side: TradeSide;
   strategy: string;
@@ -78,7 +80,7 @@ export interface TradeRecord {
 }
 
 export interface EngineSettings {
-  appMode: 'PAPER' | 'TESTNET' | 'REAL';
+  appMode: AppMode;
   engineEnabled: boolean;
 
   riskKillSwitchEnabled: boolean;
@@ -94,6 +96,10 @@ export interface EngineSettings {
   cryptoMaxLossPctPerTrade: number;
   cryptoMinSignalConfidence: number;
   cryptoMinRollingWinRate: number;
+
+  // PAPER uses the same live market feed but keeps its own simulated account.
+  paperInitialBalance: number;
+  paperRoundTripCostPct: number;
 
   // Forex is signal-only in the Linux individual edition. The legacy MT5 sizing
   // fields remain for DB/backward compatibility but are not used for execution.
