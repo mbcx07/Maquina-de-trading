@@ -12,7 +12,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const text = await response.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = text; }
-  if (!response.ok) throw new Error(data?.error || data?.test?.error || `HTTP ${response.status}`);
+  if (!response.ok) throw new Error(data?.error || data?.detail || data?.test?.error || `HTTP ${response.status}`);
   return data as T;
 }
 
@@ -25,6 +25,10 @@ export const v34Api = {
   startEngine: () => request('/api/engine/start', { method: 'POST' }),
   pauseEngine: () => request('/api/engine/pause', { method: 'POST' }),
   emergencyStop: () => request('/api/emergency-stop', { method: 'POST' }),
+  reconcile: () => request('/api/reconcile', { method: 'POST' }),
+  runForexScanner: () => request<any>('/api/scanners/forex/run', { method: 'POST' }),
+  runCryptoScanner: () => request<any>('/api/scanners/crypto/run', { method: 'POST' }),
+  closePaperTrade: (tradeId: string) => request<any>(`/api/paper/trades/${encodeURIComponent(tradeId)}/close`, { method: 'POST' }),
 
   getIntegrations: () => request<any>('/api/integrations'),
   saveBinanceIntegration: (apiKey: string, apiSecret: string) => request<any>('/api/integrations/binance', {
