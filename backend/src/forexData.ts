@@ -89,14 +89,13 @@ export class ForexDataClient {
     const dataSymbol = await this.resolveDataSymbol(symbol);
     await this.waitForCreditCapacity(1);
 
-    // M5 is the entry/structure timeframe. Build M15 locally from the same M5 series,
-    // keeping one Twelve Data credit per instrument instead of requesting two series.
-    // 700 x M5 bars provide enough history for 210 closed M15 bars plus the 100-bar M5 window.
+    // One M5 request feeds both M5 and locally aggregated M15. Keep a deeper M5
+    // window so the rolling high-winrate validator has enough completed setups.
     const rawM5 = await this.getRatesResolved(dataSymbol, '5min', 700);
     const closedM5 = closedCandles(rawM5, 5 * 60_000);
     const aggregatedM15 = closedCandles(aggregateCandles(closedM5, 15), 15 * 60_000);
-    const ltf = closedM5.slice(-100);
-    const htf = aggregatedM15.slice(-210);
+    const ltf = closedM5.slice(-320);
+    const htf = aggregatedM15.slice(-220);
 
     if (ltf.length < 100 || htf.length < 210) {
       throw new Error(`TWELVE_DATA_INSUFFICIENT_M5_M15_HISTORY:${symbol}:${dataSymbol}:m5=${ltf.length}:m15=${htf.length}`);
