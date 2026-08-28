@@ -13,6 +13,9 @@ export interface ForexOutcomeRow {
   stopLoss: number;
   takeProfit: number;
   status: ForexOutcomeStatus;
+  orderType?: string;
+  fillTime?: number;
+  pendingExpiresAt?: number;
   exitPrice?: number;
   returnPct?: number;
   createdAt: number;
@@ -23,6 +26,8 @@ export interface ForexOutcomeRow {
 export interface ForexPerformanceSummary {
   tracked: number;
   open: number;
+  pending: number;
+  filledOpen: number;
   resolved: number;
   wins: number;
   losses: number;
@@ -47,6 +52,7 @@ export interface ForexPerformanceSummary {
   recent: ForexOutcomeRow[];
 }
 
+const M5_MS = 5 * 60_000;
 const MAX_SIGNAL_AGE_MS = 24 * 60 * 60_000;
 
 export class ForexSignalTracker {
@@ -56,11 +62,18 @@ export class ForexSignalTracker {
 
   register(signal: Opportunity): void {
     const dataSymbol = typeof signal.metadata?.dataSymbol === 'string' ? signal.metadata.dataSymbol : undefined;
+    const orderType = typeof signal.metadata?.orderType === 'string' ? signal.metadata.orderType : 'MARKET_REFERENCE';
+    const pending = Boolean(signal.metadata?.pendingRetest) || orderType.includes('LIMIT');
+    const pendingExpiresAt = pending && Number.isFinite(Number(signal.metadata?.expiresAt))
+      ? Number(signal.metadata?.expiresAt)
+      : pending ? signal.createdAt + 3 * M5_MS : null;
+    const fillTime = pending ? null : signal.createdAt;
+
     this.database.db.prepare(`
       INSERT INTO forex_signal_outcomes(
         signal_id, symbol, data_symbol, side, entry_price, stop_loss, take_profit,
-        status, created_at, updated_at
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
+        status, order_type, fill_time, pending_expires_at, created_at, updated_at
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)
       ON CONFLICT(signal_id) DO NOTHING
     `).run(
       signal.signalId,
@@ -70,6 +83,9 @@ export class ForexSignalTracker {
       signal.entry,
       signal.stopLoss,
       signal.takeProfit,
+      orderType,
+      fillTime,
+      pendingExpiresAt,
       signal.createdAt,
       Date.now(),
     );
@@ -89,17 +105,53 @@ export class ForexSignalTracker {
     const latest = sorted.at(-1)!;
 
     for (const raw of rows) {
-      const row = mapRow(raw);
-      const firstSafeCandle = Math.floor(row.createdAt / 60_000) * 60_000 + 60_000;
-      const from = Math.max(firstSafeCandle, (row.lastCheckedTime ?? 0) + 60_000);
-      const relevant = sorted.filter((candle) => candle.time >= from);
+      let row = mapRow(raw);
+      const firstSafeCandle = Math.floor(row.createdAt / M5_MS) * M5_MS + M5_MS;
+      const lastCheckedNext = (row.lastCheckedTime ?? 0) > 0 ? (row.lastCheckedTime ?? 0) + M5_MS : firstSafeCandle;
+      let relevant = sorted.filter((candle) => candle.time >= Math.max(firstSafeCandle, lastCheckedNext));
 
+      if (!row.fillTime && isPending(row)) {
+        let filled = false;
+        for (const candle of relevant) {
+          if (row.pendingExpiresAt && candle.time > row.pendingExpiresAt) break;
+          const entryTouched = row.side === 'BUY' ? candle.low <= row.entry : candle.high >= row.entry;
+          if (!entryTouched) continue;
+
+          const slTouchedOnFill = row.side === 'BUY' ? candle.low <= row.stopLoss : candle.high >= row.stopLoss;
+          this.markFilled(row.signalId, candle.time);
+          row = { ...row, fillTime: candle.time };
+          filled = true;
+
+          // Conservative same-candle rule. If the fill candle also reaches SL we
+          // count the loss. TP on the fill candle is not credited because OHLC
+          // cannot prove the entry happened before the target.
+          if (slTouchedOnFill) {
+            this.resolve(row, 'LOSS', row.stopLoss, candle.time);
+            filled = false;
+          }
+          break;
+        }
+
+        const stillOpen = this.isStillOpen(row.signalId);
+        if (!stillOpen) continue;
+        if (!filled && !row.fillTime) {
+          if (row.pendingExpiresAt && Date.now() >= row.pendingExpiresAt) {
+            this.resolve(row, 'EXPIRED', latest.close, Math.min(latest.time, row.pendingExpiresAt));
+            continue;
+          }
+          if (relevant.length) this.markChecked(row.signalId, relevant.at(-1)!.time);
+          continue;
+        }
+      }
+
+      if (!row.fillTime) continue;
+      relevant = sorted.filter((candle) => candle.time >= row.fillTime! + M5_MS && candle.time >= lastCheckedNext);
       let resolved = false;
       for (const candle of relevant) {
         const slTouched = row.side === 'BUY' ? candle.low <= row.stopLoss : candle.high >= row.stopLoss;
         const tpTouched = row.side === 'BUY' ? candle.high >= row.takeProfit : candle.low <= row.takeProfit;
 
-        // Conservative same-candle handling: if OHLC cannot prove order, count SL first.
+        // Conservative same-candle handling: SL first when OHLC cannot prove order.
         if (slTouched) {
           this.resolve(row, 'LOSS', row.stopLoss, candle.time);
           resolved = true;
@@ -118,13 +170,7 @@ export class ForexSignalTracker {
         continue;
       }
 
-      if (relevant.length) {
-        this.database.db.prepare(`
-          UPDATE forex_signal_outcomes
-          SET last_checked_time = ?, updated_at = ?
-          WHERE signal_id = ?
-        `).run(relevant.at(-1)!.time, Date.now(), row.signalId);
-      }
+      if (relevant.length) this.markChecked(row.signalId, relevant.at(-1)!.time);
     }
   }
 
@@ -137,6 +183,8 @@ export class ForexSignalTracker {
     const wins = resolved.filter((row) => row.status === 'WIN');
     const losses = resolved.filter((row) => row.status === 'LOSS');
     const expired = all.filter((row) => row.status === 'EXPIRED').length;
+    const pending = all.filter((row) => row.status === 'OPEN' && !row.fillTime && isPending(row)).length;
+    const filledOpen = all.filter((row) => row.status === 'OPEN' && Boolean(row.fillTime)).length;
     const grossProfitPct = wins.reduce((sum, row) => sum + Math.max(0, row.returnPct ?? 0), 0);
     const grossLossAbs = Math.abs(losses.reduce((sum, row) => sum + Math.min(0, row.returnPct ?? 0), 0));
     const netReturnPct = resolved.reduce((sum, row) => sum + (row.returnPct ?? 0), 0);
@@ -166,6 +214,8 @@ export class ForexSignalTracker {
     return {
       tracked: all.length,
       open: all.filter((row) => row.status === 'OPEN').length,
+      pending,
+      filledOpen,
       resolved: resolved.length,
       wins: wins.length,
       losses: losses.length,
@@ -181,8 +231,29 @@ export class ForexSignalTracker {
     };
   }
 
+  private markFilled(signalId: string, fillTime: number): void {
+    this.database.db.prepare(`
+      UPDATE forex_signal_outcomes
+      SET fill_time = ?, last_checked_time = ?, updated_at = ?
+      WHERE signal_id = ? AND status = 'OPEN' AND fill_time IS NULL
+    `).run(fillTime, fillTime, Date.now(), signalId);
+  }
+
+  private markChecked(signalId: string, time: number): void {
+    this.database.db.prepare(`
+      UPDATE forex_signal_outcomes
+      SET last_checked_time = ?, updated_at = ?
+      WHERE signal_id = ? AND status = 'OPEN'
+    `).run(time, Date.now(), signalId);
+  }
+
+  private isStillOpen(signalId: string): boolean {
+    const row = this.database.db.prepare(`SELECT status FROM forex_signal_outcomes WHERE signal_id=?`).get(signalId) as { status?: string } | undefined;
+    return row?.status === 'OPEN';
+  }
+
   private resolve(row: ForexOutcomeRow, status: 'WIN' | 'LOSS' | 'EXPIRED', exitPrice: number, resolvedAt: number): void {
-    const returnPct = directionalReturnPct(row.side, row.entry, exitPrice);
+    const returnPct = status === 'EXPIRED' && !row.fillTime ? 0 : directionalReturnPct(row.side, row.entry, exitPrice);
     this.database.db.prepare(`
       UPDATE forex_signal_outcomes
       SET status = ?, exit_price = ?, return_pct = ?, resolved_at = ?, last_checked_time = ?, updated_at = ?
@@ -213,6 +284,19 @@ export class ForexSignalTracker {
       CREATE INDEX IF NOT EXISTS idx_forex_outcomes_created
         ON forex_signal_outcomes(created_at DESC);
     `);
+    this.ensureColumn('forex_signal_outcomes', 'order_type', 'TEXT');
+    this.ensureColumn('forex_signal_outcomes', 'fill_time', 'INTEGER');
+    this.ensureColumn('forex_signal_outcomes', 'pending_expires_at', 'INTEGER');
+    this.database.db.prepare(`
+      UPDATE forex_signal_outcomes
+      SET order_type='MARKET_REFERENCE', fill_time=COALESCE(fill_time, created_at)
+      WHERE order_type IS NULL
+    `).run();
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.database.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((item) => item.name === column)) this.database.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
 
@@ -226,12 +310,19 @@ function mapRow(row: Record<string, unknown>): ForexOutcomeRow {
     stopLoss: Number(row.stop_loss),
     takeProfit: Number(row.take_profit),
     status: String(row.status) as ForexOutcomeStatus,
+    orderType: row.order_type == null ? undefined : String(row.order_type),
+    fillTime: row.fill_time == null ? undefined : Number(row.fill_time),
+    pendingExpiresAt: row.pending_expires_at == null ? undefined : Number(row.pending_expires_at),
     exitPrice: row.exit_price == null ? undefined : Number(row.exit_price),
     returnPct: row.return_pct == null ? undefined : Number(row.return_pct),
     createdAt: Number(row.created_at),
     resolvedAt: row.resolved_at == null ? undefined : Number(row.resolved_at),
     lastCheckedTime: row.last_checked_time == null ? undefined : Number(row.last_checked_time),
   };
+}
+
+function isPending(row: ForexOutcomeRow): boolean {
+  return Boolean(row.orderType?.includes('LIMIT')) || Boolean(row.pendingExpiresAt);
 }
 
 function directionalReturnPct(side: TradeSide, entry: number, exit: number): number {
