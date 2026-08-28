@@ -1,13 +1,13 @@
 import crypto from 'node:crypto';
-import { analyzeStructureStrategyV335, runRollingBacktestV335 } from './analysisV335.js';
 import { BinanceMarketDataClient } from './binanceMarket.js';
 import { TradingDatabase } from './database.js';
+import { latestPendingSetupR11, signalFromPendingR11 } from './highWinrateR11.js';
 import { OpportunityOrchestrator } from './orchestrator.js';
 import { UniverseQualificationService } from './universeQualification.js';
 import type { EngineSettings, Opportunity, TradeSide } from './types.js';
 
-const STRATEGY_LABEL = 'R10_HIGH_WINRATE_SWEEP_M5_M15';
-const EXIT_MODEL = 'R10_SWEEP_STRUCTURAL_TP060R';
+const STRATEGY_LABEL = 'R11_CALIBRATED_SWEEP_RETEST_M5_M15';
+const EXIT_MODEL = 'R11_PENDING_RETEST_STRUCTURAL';
 
 export class CryptoMarketScanner {
   private running = false;
@@ -27,7 +27,7 @@ export class CryptoMarketScanner {
   start(): void {
     this.stopped = false;
     this.sanitizeSettings();
-    if (this.getSettings().cryptoEnabled && this.qualification.shouldRefresh(7)) this.qualification.runInBackground(14);
+    if (this.getSettings().cryptoEnabled && this.qualification.shouldRefresh(3)) this.qualification.runInBackground(28);
     void this.loop();
   }
 
@@ -50,37 +50,33 @@ export class CryptoMarketScanner {
       return;
     }
 
-    if (this.qualification.shouldRefresh(7)) this.qualification.runInBackground(14);
+    if (this.qualification.shouldRefresh(3)) this.qualification.runInBackground(28);
     const audit = this.qualification.getState();
-    // Never trust cached symbols from an older strategy model.
     const qualified = new Set(this.qualification.getQualifiedSymbols().map((symbol) => symbol.toUpperCase()));
 
     if (qualified.size === 0) {
-      if (audit.status === 'COMPLETED' && String(audit.rules?.exitModel ?? '').startsWith('R10_')) {
-        this.saveState({
-          status: 'NO_QUALIFIED_SYMBOLS', strategy: STRATEGY_LABEL, timeframe: '5m/15m',
-          qualification: 'PROFITABLE_ONLY', auditCompletedAt: audit.completedAt,
-          auditProgress: { completed: audit.completed ?? 0, total: audit.total ?? 0 },
-          qualifiedUniverse: 0, completedAt: Date.now(),
-          message: 'R10 no tiene todavía símbolos que superen rentabilidad, OOS y PF. No se abre ninguna operación.',
-        });
-      } else {
-        this.saveState({
-          status: 'WAITING_UNIVERSE_AUDIT', strategy: STRATEGY_LABEL, timeframe: '5m/15m',
-          auditStatus: audit.status, startedAt: audit.startedAt, completedAt: audit.completedAt,
-          total: audit.total ?? 0, scanned: audit.completed ?? 0, current: audit.current ?? null,
-          qualifiedUniverse: 0, auditError: audit.error,
-          message: 'Recalculando universo R10 con backtest M5/M15. La whitelist anterior no se utiliza.',
-        });
-      }
+      const completedR11 = audit.status === 'COMPLETED' && String(audit.rules?.exitModel ?? '').startsWith('R11_');
+      this.saveState(completedR11 ? {
+        status: 'NO_QUALIFIED_SYMBOLS', strategy: STRATEGY_LABEL, timeframe: '5m/15m',
+        qualification: 'CALIBRATED_EXTERNAL_ONLY', auditCompletedAt: audit.completedAt,
+        auditProgress: { completed: audit.completed ?? 0, total: audit.total ?? 0 },
+        qualifiedUniverse: 0, completedAt: Date.now(),
+        message: 'Ningún símbolo R11 supera todavía calibración, holdout externo, costos, WR, PF y expectancy. No se abre ninguna operación.',
+      } : {
+        status: 'WAITING_UNIVERSE_AUDIT', strategy: STRATEGY_LABEL, timeframe: '5m/15m',
+        auditStatus: audit.status, startedAt: audit.startedAt, completedAt: audit.completedAt,
+        total: audit.total ?? 0, scanned: audit.completed ?? 0, current: audit.current ?? null,
+        qualifiedUniverse: 0, auditError: audit.error,
+        message: 'Calibrando R11 por símbolo en worker: M5/M15 + retest + validación externa. La whitelist R10 no se reutiliza.',
+      });
       return;
     }
 
     const qualificationMode = audit.status === 'COMPLETED'
-      ? 'PROFITABLE_ONLY'
+      ? 'CALIBRATED_EXTERNAL_ONLY'
       : audit.status === 'RUNNING'
-        ? 'PROFITABLE_PARTIAL'
-        : 'PROFITABLE_LAST_KNOWN';
+        ? 'CALIBRATED_EXTERNAL_PARTIAL'
+        : 'CALIBRATED_EXTERNAL_LAST_KNOWN';
 
     this.running = true;
     const startedAt = Date.now();
@@ -105,7 +101,7 @@ export class CryptoMarketScanner {
         startedAt, total: symbols.length, universeTotal: allSymbols.length, liquidUniverse: liquidSymbols.length,
         qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified], minQuoteVolume24h: 2_000_000,
         auditProgress: { status: audit.status, completed: audit.completed ?? 0, total: audit.total ?? 0, current: audit.current },
-        scanned: 0, opportunities: 0, revalidated: 0, selected: 0, executed: 0, errors: 0,
+        scanned: 0, opportunities: 0, selected: 0, executed: 0, errors: 0,
         exitModel: EXIT_MODEL,
       });
 
@@ -123,35 +119,17 @@ export class CryptoMarketScanner {
           status: 'SCANNING', strategy: STRATEGY_LABEL, timeframe: '5m/15m', qualification: qualificationMode,
           startedAt, total: symbols.length, universeTotal: allSymbols.length, liquidUniverse: liquidSymbols.length,
           qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified], scanned,
-          current: chunk.at(-1) ?? null, opportunities: opportunities.length, revalidated: 0, selected: 0, executed: 0, errors,
+          current: chunk.at(-1) ?? null, opportunities: opportunities.length, selected: 0, executed: 0, errors,
           auditProgress: { status: audit.status, completed: audit.completed ?? 0, total: audit.total ?? 0, current: audit.current },
           exitModel: EXIT_MODEL,
         });
-        if (i + chunkSize < symbols.length) await sleep(850);
+        if (i + chunkSize < symbols.length) await sleep(450);
       }
 
-      const revalidationPool = [...opportunities]
+      const ranked = [...opportunities]
         .sort((a, b) => b.score - a.score || b.confidence - a.confidence)
         .slice(0, Math.max(20, Math.min(40, settings.maxConcurrentCryptoTrades * 4)));
-      const freshOpportunities: Opportunity[] = [];
-      for (const original of revalidationPool) {
-        try {
-          const fresh = await this.scanSymbol(original.symbol, liquidity.get(original.symbol) ?? 0);
-          if (!fresh) continue;
-          fresh.metadata = {
-            ...(fresh.metadata ?? {}),
-            firstDetectedAt: original.createdAt,
-            firstDetectedEntry: original.entry,
-            revalidatedAt: Date.now(),
-            executionRevalidation: true,
-          };
-          freshOpportunities.push(fresh);
-        } catch {
-          errors++;
-        }
-      }
-
-      const result = await this.orchestrator.process(freshOpportunities, true);
+      const result = await this.orchestrator.process(ranked, true);
       const executionErrors = result.executionResults
         .filter((item) => item.broker === 'BINANCE' && item.ok !== true)
         .map((item) => String(item.error ?? 'UNKNOWN_EXECUTION_ERROR'));
@@ -162,19 +140,15 @@ export class CryptoMarketScanner {
         startedAt, completedAt: Date.now(), total: symbols.length, universeTotal: allSymbols.length,
         liquidUniverse: liquidSymbols.length, qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified],
         auditProgress: { status: audit.status, completed: audit.completed ?? 0, total: audit.total ?? 0, current: audit.current },
-        scanned, opportunities: opportunities.length, revalidated: freshOpportunities.length,
-        staleRejected: Math.max(0, revalidationPool.length - freshOpportunities.length),
-        selected: result.selected.crypto.length, executed, errors,
+        scanned, opportunities: opportunities.length, selected: result.selected.crypto.length, executed, errors,
         lastExecutionErrors: executionErrors.slice(-8),
         diagnostic: opportunities.length === 0
-          ? 'NO_VALID_R10_SETUP_IN_QUALIFIED_SYMBOLS'
-          : freshOpportunities.length === 0
-            ? 'SETUPS_BECAME_STALE_ON_REVALIDATION'
-            : result.selected.crypto.length === 0
-              ? 'NO_FREE_SLOT_OR_SELECTION_FILTER'
-              : executed === 0 && executionErrors.length
-                ? 'EXECUTION_REJECTED'
-                : undefined,
+          ? 'NO_R11_RETEST_TOUCH_NOW'
+          : result.selected.crypto.length === 0
+            ? 'NO_FREE_SLOT_OR_SELECTION_FILTER'
+            : executed === 0 && executionErrors.length
+              ? 'EXECUTION_REJECTED'
+              : undefined,
         exitModel: EXIT_MODEL,
       });
     } catch (error) {
@@ -200,26 +174,28 @@ export class CryptoMarketScanner {
   }
 
   private async scanSymbol(symbol: string, liquidityScore: number): Promise<Opportunity | null> {
+    const approved = this.qualification.getModel(symbol);
+    if (!approved?.model?.config) return null;
+
     const { ltf, htf } = await this.market.getDualKlines(symbol);
     if (ltf.length < 100 || htf.length < 210) return null;
+    const setup = latestPendingSetupR11(ltf, htf, approved.model.config, approved.model.config.pendingBars);
+    if (!setup) return null;
 
-    const signal = analyzeStructureStrategyV335(ltf.slice(-100), htf.slice(-210), symbol);
+    const markPrice = await this.market.getMarkPrice(symbol);
+    const signal = signalFromPendingR11(setup, markPrice);
     if (!signal) return null;
 
     const settings = this.getSettings();
-    const backtest = runRollingBacktestV335(symbol, ltf, htf);
-    const rollingWinRate = backtest.tradesEvaluated < 3
-      ? Math.max(signal.confidence, backtest.winRate)
-      : backtest.winRate;
+    const rollingWinRate = approved.external.winRate;
     if (rollingWinRate < settings.cryptoMinRollingWinRate || signal.confidence < settings.cryptoMinSignalConfidence) return null;
 
-    const score = backtest.tradesEvaluated < 3
-      ? signal.confidence
-      : backtest.score + Math.max(0, Math.min(100, liquidityScore)) * 0.001;
-    const candleTime = ltf.at(-1)?.time ?? Date.now();
+    const pfBonus = Math.min(10, Math.max(0, approved.external.profitFactor - 1) * 5);
+    const expectancyBonus = Math.min(10, Math.max(0, approved.external.expectancyPct) * 20);
+    const score = Math.min(100, rollingWinRate * 0.65 + signal.confidence * 0.25 + pfBonus + expectancyBonus + Math.max(0, Math.min(100, liquidityScore)) * 0.001);
     const fingerprint = sha256([
-      'BINANCE-R10-M5-M15', symbol, signal.side, signal.strategy, String(candleTime),
-      roundKey(signal.stopLoss), roundKey(signal.takeProfit),
+      'BINANCE-R11-RETEST', symbol, signal.side, String(setup.signalTime),
+      roundKey(setup.entry), roundKey(signal.stopLoss), roundKey(signal.takeProfit),
     ].join('|'));
     const exitDisplay = exitDisplayProfile(
       signal.side, signal.entry, signal.stopLoss, signal.takeProfit, signal.tp2, signal.tp3,
@@ -231,16 +207,35 @@ export class CryptoMarketScanner {
       signalId: `SIG-BN-${fingerprint.slice(0, 24)}`,
       signalFingerprint: fingerprint,
       broker: 'BINANCE', symbol, side: signal.side, timeframe: '5m/15m', strategy: signal.strategy,
-      confidence: signal.confidence, rollingWinRate, expectancy: backtest.expectancyPct, score,
-      entry: signal.entry, stopLoss: signal.stopLoss, takeProfit: signal.takeProfit, tp2: signal.tp2, tp3: signal.tp3,
+      confidence: signal.confidence,
+      rollingWinRate,
+      expectancy: approved.external.expectancyPct,
+      score,
+      entry: signal.entry,
+      stopLoss: signal.stopLoss,
+      takeProfit: signal.takeProfit,
+      tp2: signal.tp2,
+      tp3: signal.tp3,
       createdAt: Date.now(),
       metadata: {
-        reason: signal.reason, atr: signal.atr, backtest, liquidityScore,
-        rollingWinRateSource: backtest.tradesEvaluated < 3 ? 'CALIBRATING_CONFIDENCE_FLOOR' : 'ROLLING_BACKTEST_R10',
-        strategyCompatibility: 'R10_SWEEP_RECLAIM_MSS_ON_M5_BIAS_ON_M15', trendSource: `${symbol}:M15_EMA20_50`,
-        decisionWindows: { m5: 100, m15: 210, rollingM5: ltf.length }, candleTime,
+        reason: signal.reason,
+        atr: signal.atr,
+        liquidityScore,
+        strategyCompatibility: 'R11_CALIBRATED_SWEEP_RECLAIM_MSS_PENDING_RETEST_M5_M15',
+        qualification: 'CALIBRATION_PLUS_EXTERNAL_HOLDOUT_AFTER_COSTS',
+        modelStatus: approved.modelStatus,
+        modelFallback: approved.fallback,
+        modelConfig: approved.model.config,
+        modelValidation: approved.model.validation,
+        modelHoldout: approved.model.holdout,
+        external: approved.external,
+        plannedRetestEntry: setup.entry,
+        touchedAtMarkPrice: markPrice,
+        signalTime: setup.signalTime,
+        sweepExtreme: setup.sweepExtreme,
+        liquidityLevel: setup.liquidity,
         exitModel: EXIT_MODEL,
-        targetProfile: 'TP1_0.60R_TP2_1.00R_TP3_1.50R',
+        targetProfile: `TP1_${approved.model.config.rr.toFixed(2)}R_TP2_1.00R_TP3_1.50R`,
         exitDisplay,
       },
     };
@@ -251,7 +246,7 @@ export class CryptoMarketScanner {
     const next: EngineSettings = {
       ...settings,
       cryptoMinRollingWinRate: settings.cryptoMinRollingWinRate === 75 ? 64 : settings.cryptoMinRollingWinRate,
-      cryptoMinSignalConfidence: settings.cryptoMinSignalConfidence === 75 ? 74 : settings.cryptoMinSignalConfidence,
+      cryptoMinSignalConfidence: settings.cryptoMinSignalConfidence === 75 ? 70 : settings.cryptoMinSignalConfidence,
     };
     if (JSON.stringify(next) !== JSON.stringify(settings)) this.database.saveSettings(next);
   }
@@ -293,7 +288,7 @@ function exitDisplayProfile(
     tp2MarginRoePct: tp2PricePct * lev,
     tp3MarginRoePct: tp3PricePct * lev,
     leverage: lev,
-    note: 'R10 M5 structural price distance; leverage only amplifies margin ROE/PnL.',
+    note: 'R11 structural retest distance; leverage only amplifies margin ROE/PnL.',
   };
 }
 
