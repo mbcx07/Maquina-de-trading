@@ -7,7 +7,12 @@ import type { Candle } from './analysis.js';
 
 const BASE = 'https://data.binance.vision/data/futures/um/daily/klines';
 const DAY = 24 * 60 * 60_000;
-const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
+const SYMBOLS = [
+  'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
+  'DOGEUSDT', 'ADAUSDT', 'LINKUSDT', 'AVAXUSDT', 'BCHUSDT',
+  'LTCUSDT', 'TRXUSDT', 'DOTUSDT', 'UNIUSDT', 'AAVEUSDT',
+  'NEARUSDT', 'OPUSDT', 'ARBUSDT', 'SUIUSDT', 'WLDUSDT',
+];
 const CALIBRATION_DAYS = 21;
 const EXTERNAL_DAYS = 7;
 const ROUND_TRIP_COST_PCT = 0.12;
@@ -102,49 +107,56 @@ async function main() {
   const results: any[] = [];
 
   for (const symbol of SYMBOLS) {
-    const [m5, m15] = await Promise.all([
-      fetchVisionRange(symbol, '5m', warmupStart, externalEnd, dir),
-      fetchVisionRange(symbol, '15m', warmupStart, externalEnd, dir),
-    ]);
-    const calibrationM5 = m5.filter((c) => c.time >= calibrationStart && c.time <= calibrationEnd);
-    const calibrationM15 = m15.filter((c) => c.time >= calibrationStart - 220 * 15 * 60_000 && c.time <= calibrationEnd);
-    if (calibrationM5.length < 3000 || calibrationM15.length < 500) throw new Error(`VISION_INSUFFICIENT:${symbol}:m5=${calibrationM5.length}:m15=${calibrationM15.length}`);
+    try {
+      const [m5, m15] = await Promise.all([
+        fetchVisionRange(symbol, '5m', warmupStart, externalEnd, dir),
+        fetchVisionRange(symbol, '15m', warmupStart, externalEnd, dir),
+      ]);
+      const calibrationM5 = m5.filter((c) => c.time >= calibrationStart && c.time <= calibrationEnd);
+      const calibrationM15 = m15.filter((c) => c.time >= calibrationStart - 220 * 15 * 60_000 && c.time <= calibrationEnd);
+      if (calibrationM5.length < 3000 || calibrationM15.length < 500) throw new Error(`VISION_INSUFFICIENT:${symbol}:m5=${calibrationM5.length}:m15=${calibrationM15.length}`);
 
-    const model = calibrateR11(calibrationM5, calibrationM15);
-    let external = { trades: 0, wins: 0, losses: 0, winRate: 0, netReturnPct: 0, expectancyPct: 0, profitFactor: 0, maxDrawdownPct: 0 };
-    if (model.ready) {
-      const evaluation = evaluateConfigExternalR11(m5, m15, model.config, externalStart, externalEnd);
-      external = externalMetrics(evaluation.trades);
+      const model = calibrateR11(calibrationM5, calibrationM15);
+      let external = { trades: 0, wins: 0, losses: 0, winRate: 0, netReturnPct: 0, expectancyPct: 0, profitFactor: 0, maxDrawdownPct: 0 };
+      if (model.ready) {
+        const evaluation = evaluateConfigExternalR11(m5, m15, model.config, externalStart, externalEnd);
+        external = externalMetrics(evaluation.trades);
+      }
+
+      const row = {
+        symbol,
+        modelReady: model.ready,
+        modelStatus: model.status,
+        fallback: model.fallback,
+        config: model.config,
+        train: summarize(model.train),
+        validation: summarize(model.validation),
+        holdout: summarize(model.holdout),
+        external: summarizeExternal(external),
+        externalPass: model.ready && external.trades >= 3 && external.winRate >= 64 && external.expectancyPct > 0 && external.profitFactor >= 1.02,
+      };
+      results.push(row);
+      console.log('R11_BENCH', JSON.stringify(row));
+    } catch (error) {
+      const row = { symbol, error: error instanceof Error ? error.message : String(error), modelReady: false, externalPass: false, external: { trades: 0, winRate: 0, expectancyPct: 0 } };
+      results.push(row);
+      console.log('R11_BENCH', JSON.stringify(row));
     }
-
-    const row = {
-      symbol,
-      modelReady: model.ready,
-      modelStatus: model.status,
-      fallback: model.fallback,
-      config: model.config,
-      train: summarize(model.train),
-      validation: summarize(model.validation),
-      holdout: summarize(model.holdout),
-      external: summarizeExternal(external),
-      externalPass: model.ready && external.trades >= 3 && external.winRate >= 64 && external.expectancyPct > 0 && external.profitFactor >= 1.02,
-    };
-    results.push(row);
-    console.log('R11_BENCH', JSON.stringify(row));
   }
 
   const ready = results.filter((row) => row.modelReady);
-  const extTrades = ready.reduce((sum, row) => sum + row.external.trades, 0);
+  const extTrades = ready.reduce((sum, row) => sum + Number(row.external?.trades || 0), 0);
   const weightedExternalWR = extTrades
-    ? ready.reduce((sum, row) => sum + row.external.winRate * row.external.trades, 0) / extTrades
+    ? ready.reduce((sum, row) => sum + Number(row.external?.winRate || 0) * Number(row.external?.trades || 0), 0) / extTrades
     : 0;
   const summary = {
     symbols: results.length,
     modelsReady: ready.length,
     externalPass: results.filter((row) => row.externalPass).length,
+    externalPassSymbols: results.filter((row) => row.externalPass).map((row) => row.symbol),
     externalTrades: extTrades,
     weightedExternalWinRate: Number(weightedExternalWR.toFixed(2)),
-    positiveExternalExpectancy: ready.filter((row) => row.external.expectancyPct > 0).length,
+    positiveExternalExpectancy: ready.filter((row) => Number(row.external?.expectancyPct || 0) > 0).length,
   };
   console.log('R11_BENCH_SUMMARY', JSON.stringify(summary));
 }
