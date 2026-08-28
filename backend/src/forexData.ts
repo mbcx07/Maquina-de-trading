@@ -48,15 +48,6 @@ export interface DualRatesResult {
   dataSymbol: string;
 }
 
-const SYMBOL_ALIASES: Record<string, string> = {
-  NAS100: 'NASDAQ 100',
-  US100: 'NASDAQ 100',
-  SPX500: 'S&P 500',
-  US500: 'S&P 500',
-  US30: 'Dow Jones Industrial Average',
-  DAX40: 'DAX 40',
-};
-
 export class ForexDataClient {
   private readonly baseUrl = 'https://api.twelvedata.com';
   private usage: ForexDataUsage = {};
@@ -85,12 +76,10 @@ export class ForexDataClient {
     };
   }
 
+  /** Fast live window used after a symbol already has a cached R11 model. */
   async dualRates(symbol: string): Promise<DualRatesResult> {
     const dataSymbol = await this.resolveDataSymbol(symbol);
     await this.waitForCreditCapacity(1);
-
-    // One M5 request feeds both M5 and locally aggregated M15. Keep a deeper M5
-    // window so the rolling high-winrate validator has enough completed setups.
     const rawM5 = await this.getRatesResolved(dataSymbol, '5min', 700);
     const closedM5 = closedCandles(rawM5, 5 * 60_000);
     const aggregatedM15 = closedCandles(aggregateCandles(closedM5, 15), 15 * 60_000);
@@ -99,6 +88,22 @@ export class ForexDataClient {
 
     if (ltf.length < 100 || htf.length < 210) {
       throw new Error(`TWELVE_DATA_INSUFFICIENT_M5_M15_HISTORY:${symbol}:${dataSymbol}:m5=${ltf.length}:m15=${htf.length}`);
+    }
+    return { ltf, htf, dataSymbol };
+  }
+
+  /**
+   * Deep history used only for R11 model calibration. Twelve Data caps outputsize
+   * at 5000, which is still enough for the M5 60/20/20 calibration/holdout split.
+   */
+  async dualRatesCalibration(symbol: string): Promise<DualRatesResult> {
+    const dataSymbol = await this.resolveDataSymbol(symbol);
+    await this.waitForCreditCapacity(1);
+    const rawM5 = await this.getRatesResolved(dataSymbol, '5min', 5000);
+    const ltf = closedCandles(rawM5, 5 * 60_000);
+    const htf = closedCandles(aggregateCandles(ltf, 15), 15 * 60_000);
+    if (ltf.length < 3000 || htf.length < 500) {
+      throw new Error(`TWELVE_DATA_R11_CALIBRATION_HISTORY_INSUFFICIENT:${symbol}:${dataSymbol}:m5=${ltf.length}:m15=${htf.length}`);
     }
     return { ltf, htf, dataSymbol };
   }
@@ -122,13 +127,6 @@ export class ForexDataClient {
       const slash = `${clean.slice(0, 3)}/${clean.slice(3)}`;
       this.resolvedSymbols.set(clean, slash);
       return slash;
-    }
-
-    const searchTerm = SYMBOL_ALIASES[clean];
-    if (searchTerm) {
-      const resolved = await this.searchProviderSymbol(searchTerm, clean);
-      this.resolvedSymbols.set(clean, resolved);
-      return resolved;
     }
 
     if (/^[A-Z0-9.^:_-]{1,24}$/.test(clean)) {
@@ -285,15 +283,12 @@ function normalizeInputSymbol(symbol: string): string {
 
 function symbolSearchScore(item: SymbolSearchItem, query: string): number {
   const name = String(item.instrument_name ?? '').toUpperCase();
-  const type = String(item.instrument_type ?? '').toUpperCase();
   const symbol = String(item.symbol ?? '').toUpperCase();
   const q = query.toUpperCase();
   let score = 0;
   if (name === q) score += 100;
   if (name.includes(q)) score += 50;
-  if (symbol.includes('NDX') && q.includes('NASDAQ')) score += 45;
-  if (type.includes('INDEX')) score += 30;
-  if (type.includes('ETF')) score -= 10;
+  if (symbol === q) score += 50;
   return score;
 }
 
