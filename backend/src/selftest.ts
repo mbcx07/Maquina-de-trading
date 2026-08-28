@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { calibrateR11Async } from './r11Calibration.js';
 import { calculateCryptoSizing } from './risk.js';
 import { selectCryptoOpportunities, selectForexOpportunities } from './selection.js';
 import type { Opportunity, TradeRecord } from './types.js';
@@ -151,4 +152,12 @@ const activeTrade = (broker: 'BINANCE' | 'MT5', symbol: string, fingerprint: str
   assert.equal(result.targetNotional, 10);
 }
 
-console.log('V34 selftest: OK');
+// R11 worker must boot under the same Node/tsx runtime used in Docker. Empty history
+// returns immediately and validates worker loading/message plumbing without doing a full calibration.
+{
+  const model = await calibrateR11Async([], []);
+  assert.equal(model.ready, false);
+  assert.equal(model.status, 'INSUFFICIENT_M5_HISTORY');
+}
+
+console.log('V34 R11 selftest: OK');
