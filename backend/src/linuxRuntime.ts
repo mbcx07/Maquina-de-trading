@@ -1,26 +1,30 @@
-import cors from 'cors';
 import express from 'express';
+import cors from 'cors';
 import { z } from 'zod';
-import { BinanceUsdmClient } from './binance.js';
-import { BinanceMarketDataClient } from './binanceMarket.js';
-import { defaultSettings, env } from './config.js';
-import { CryptoExecutionService } from './cryptoExecution.js';
-import { CryptoMarketScanner } from './cryptoScanner.js';
+import { env, defaultSettings } from './config.js';
 import { TradingDatabase } from './database.js';
-import { EmergencyStopService } from './emergencyStop.js';
-import { ForexDataClient } from './forexData.js';
-import { ForexMarketScanner } from './forexScanner.js';
-import { HistoricalBacktestService } from './historicalBacktest.js';
-import { createIntegrationRouter } from './integrationRoutes.js';
-import { IntegrationVault, normalizeWorkspaceId } from './integrationVault.js';
-import { calculateMetrics, metricsByStrategy, metricsBySymbol } from './metrics.js';
-import { Mt5BridgeClient } from './mt5.js';
-import { OpportunityOrchestrator } from './orchestrator.js';
-import { PaperBrokerService } from './paperBroker.js';
-import { PositionReconciler } from './reconciler.js';
-import { TradingRepository } from './repositories.js';
-import { PortfolioRiskGuard } from './riskGuard.js';
+import { BinanceFuturesClient } from './binance.js';
+import { BinanceMarketDataClient } from './binanceMarket.js';
+import { CryptoExecutionService } from './cryptoExecution.js';
 import { TelegramService } from './telegram.js';
+import { TradingRepository } from './repositories.js';
+import { OpportunityOrchestrator } from './orchestrator.js';
+import { ReconciliationService } from './reconciler.js';
+import { RiskGuard } from './riskGuard.js';
+import { EmergencyStopService } from './emergencyStop.js';
+import { CryptoMarketScanner } from './cryptoScanner.js';
+import { ForexMarketScanner } from './forexScanner.js';
+import { ForexDataClient } from './forexData.js';
+import { MetricsService } from './metrics.js';
+import { PaperBrokerService } from './paperBroker.js';
+import { HistoricalBacktestService } from './historicalBacktest.js';
+import {
+  IntegrationVault,
+  type BinanceCredentials,
+  type TelegramCredentials,
+  type TwelveDataCredentials,
+} from './integrationVault.js';
+import { registerIntegrationRoutes } from './integrationRoutes.js';
 import type { EngineSettings, Opportunity } from './types.js';
 
 const app = express();
@@ -28,52 +32,38 @@ app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
 const database = new TradingDatabase(env.DB_PATH);
-const normalizedInitialSettings: EngineSettings = {
-  ...defaultSettings(),
-  ...(database.getSettings() ?? {}),
-  forexExecutionMode: 'SIGNAL_ONLY',
-};
-database.saveSettings(normalizedInitialSettings);
-
-const getSettings = (): EngineSettings => ({
-  ...defaultSettings(),
-  ...(database.getSettings() ?? {}),
-  forexExecutionMode: 'SIGNAL_ONLY',
+const vault = new IntegrationVault(database, env.DEFAULT_WORKSPACE_ID, env.INTEGRATION_MASTER_KEY, env.LOCAL_VAULT_KEY_PATH);
+vault.migrateEnvCredentials({
+  binance: env.BINANCE_API_KEY && env.BINANCE_API_SECRET ? { apiKey: env.BINANCE_API_KEY, apiSecret: env.BINANCE_API_SECRET } : null,
+  telegram: env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID ? { botToken: env.TELEGRAM_BOT_TOKEN, chatId: env.TELEGRAM_CHAT_ID } : null,
 });
 
-const workspaceId = normalizeWorkspaceId(env.DEFAULT_WORKSPACE_ID);
-const vault = new IntegrationVault(database);
-const repository = new TradingRepository(database);
-const telegram = new TelegramService(() => vault.getTelegram(workspaceId));
-const binance = new BinanceUsdmClient(getSettings, () => vault.getBinance(workspaceId));
+const getSettings = (): EngineSettings => {
+  const settings = database.getSettings() ?? defaultSettings();
+  if (settings.forexExecutionMode !== 'SIGNAL_ONLY') {
+    const next = { ...settings, forexExecutionMode: 'SIGNAL_ONLY' as const };
+    database.saveSettings(next);
+    return next;
+  }
+  return settings;
+};
+const saveSettings = (settings: EngineSettings): void => database.saveSettings({ ...settings, forexExecutionMode: 'SIGNAL_ONLY' });
+
+const binance = new BinanceFuturesClient(getSettings, () => vault.get<BinanceCredentials>('BINANCE'));
 const binanceMarket = new BinanceMarketDataClient(getSettings);
-const forexData = new ForexDataClient(() => vault.getTwelveData(workspaceId));
-const cryptoExecution = new CryptoExecutionService(database, repository, binance, telegram, getSettings);
+const telegram = new TelegramService(() => vault.get<TelegramCredentials>('TELEGRAM'));
+const forexData = new ForexDataClient(() => vault.get<TwelveDataCredentials>('TWELVE_DATA'));
+const repository = new TradingRepository(database);
+const metrics = new MetricsService(database);
+const cryptoExecution = new CryptoExecutionService(database, binance, repository, telegram, getSettings);
 const orchestrator = new OpportunityOrchestrator(database, repository, cryptoExecution, getSettings);
-const reconciler = new PositionReconciler(database, repository, binance, telegram, getSettings);
-const riskGuard = new PortfolioRiskGuard(database, telegram, getSettings);
-const emergencyStop = new EmergencyStopService(database, repository, binance, telegram, getSettings);
+const reconciler = new ReconciliationService(database, binance, repository, telegram, getSettings);
+const paperBroker = new PaperBrokerService(database, binanceMarket, repository, telegram, metrics, getSettings);
+const riskGuard = new RiskGuard(database, metrics, getSettings);
+const emergencyStop = new EmergencyStopService(database, binance, telegram, getSettings, saveSettings);
 const cryptoScanner = new CryptoMarketScanner(database, binanceMarket, orchestrator, getSettings);
 const forexScanner = new ForexMarketScanner(database, forexData, repository, telegram, getSettings);
-const paperBroker = new PaperBrokerService(database, repository, binanceMarket, telegram, getSettings);
-
-// Historical V34 currently remains Binance-only in the Linux UI. The legacy HTTP
-// MT5 client is passed only to preserve the existing backtest class signature and
-// does not connect unless an old MT5 backtest is explicitly invoked.
-const legacyMt5 = new Mt5BridgeClient(getSettings);
-const historicalBacktest = new HistoricalBacktestService(database, binanceMarket, legacyMt5, getSettings);
-
-app.use('/api/integrations', createIntegrationRouter(vault, getSettings, () => workspaceId));
-
-const opportunitySchema = z.object({
-  id: z.string().min(1), signalId: z.string().min(1), signalFingerprint: z.string().min(1),
-  broker: z.enum(['BINANCE', 'MT5']), symbol: z.string().min(1), side: z.enum(['BUY', 'SELL']),
-  timeframe: z.string().min(1), strategy: z.string().min(1), confidence: z.number().min(0).max(100),
-  rollingWinRate: z.number().min(0).max(100), profitFactor: z.number().optional(), expectancy: z.number().optional(),
-  score: z.number(), entry: z.number().positive(), stopLoss: z.number().positive(), takeProfit: z.number().positive(),
-  tp2: z.number().positive().optional(), tp3: z.number().positive().optional(), createdAt: z.number().int().positive(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-});
+const historicalBacktest = new HistoricalBacktestService(database, binanceMarket);
 
 const settingsPatchSchema = z.object({
   appMode: z.enum(['PAPER', 'TESTNET', 'REAL']).optional(),
@@ -81,182 +71,156 @@ const settingsPatchSchema = z.object({
   riskKillSwitchEnabled: z.boolean().optional(),
   dailyLossLimitPct: z.number().positive().max(100).optional(),
   maxDrawdownPct: z.number().positive().max(100).optional(),
-  emergencyStopMode: z.enum(['PAUSE_ONLY', 'CLOSE_TRACKED']).optional(),
-
+  emergencyStopMode: z.enum(['PAUSE_ONLY', 'CLOSE_ALL']).optional(),
   cryptoEnabled: z.boolean().optional(),
   maxConcurrentCryptoTrades: z.number().int().min(1).max(10).optional(),
   cryptoMarginPctPerTrade: z.number().positive().max(100).optional(),
   cryptoRequestedLeverage: z.number().int().min(1).max(125).optional(),
   cryptoMaxAccountExposurePct: z.number().positive().max(100).optional(),
   cryptoMaxLossPctPerTrade: z.number().positive().max(100).optional(),
+  cryptoMinStopPricePct: z.number().positive().max(25).optional(),
+  cryptoMinTakeProfitPricePct: z.number().positive().max(50).optional(),
   cryptoMinSignalConfidence: z.number().min(0).max(100).optional(),
   cryptoMinRollingWinRate: z.number().min(0).max(100).optional(),
-  paperInitialBalance: z.number().positive().max(1000000000).optional(),
+  paperInitialBalance: z.number().positive().optional(),
   paperRoundTripCostPct: z.number().min(0).max(10).optional(),
-
   forexEnabled: z.boolean().optional(),
-  forexSymbols: z.array(z.string().min(1)).min(1).max(50).optional(),
+  forexExecutionMode: z.literal('SIGNAL_ONLY').optional(),
+  forexSymbols: z.array(z.string().min(3).max(32)).min(1).max(100).optional(),
   forexSignalScanIntervalMinutes: z.number().int().min(1).max(1440).optional(),
   forexSignalsPerCycle: z.number().int().min(1).max(20).optional(),
   forexMinSignalConfidence: z.number().min(0).max(100).optional(),
   forexMinRollingWinRate: z.number().min(0).max(100).optional(),
+  maxConcurrentForexTrades: z.number().int().min(1).max(100).optional(),
+  forexMaxEntriesPerSymbol: z.number().int().min(0).max(20).optional(),
+  forexRiskMode: z.enum(['RISK_TO_SL', 'FIXED_LOT']).optional(),
+  forexPctPerTrade: z.number().positive().max(100).optional(),
+  forexMagicNumber: z.number().int().optional(),
+  forexMaxDeviationPoints: z.number().int().min(0).optional(),
+  forexMaxSpreadPoints: z.number().min(0).optional(),
+});
+
+const opportunitySchema = z.object({
+  id: z.string(), signalId: z.string(), signalFingerprint: z.string(), broker: z.enum(['BINANCE', 'MT5']), symbol: z.string(),
+  side: z.enum(['BUY', 'SELL']), timeframe: z.string(), strategy: z.string(), confidence: z.number(), rollingWinRate: z.number(),
+  expectancy: z.number(), score: z.number(), entry: z.number().positive(), stopLoss: z.number().positive(), takeProfit: z.number().positive(),
+  tp2: z.number().positive().optional(), tp3: z.number().positive().optional(), createdAt: z.number(), metadata: z.record(z.unknown()).optional(),
 });
 
 const backtestSchema = z.object({
   broker: z.literal('BINANCE'),
-  symbols: z.array(z.string().min(1)).min(1).max(25),
+  symbols: z.array(z.string().min(3).max(32)).min(1).max(25),
   startTime: z.number().int().positive(),
   endTime: z.number().int().positive(),
   initialBalance: z.number().positive().default(1000),
   allocationPct: z.number().positive().max(100).default(1),
-  leverage: z.number().min(1).max(125).default(20),
+  leverage: z.number().positive().max(125).default(20),
   roundTripCostPct: z.number().min(0).max(10).default(0.12),
-  scanStepMinutes: z.number().int().min(1).max(60).default(3),
-  maxHoldMinutes: z.number().int().min(1).max(1440).default(90),
+  scanStepMinutes: z.number().int().min(1).max(1440).default(5),
+  maxHoldMinutes: z.number().int().min(1).max(10080).default(45),
   sizingMode: z.enum(['MARGIN_PERCENT', 'RISK_TO_SL']).default('MARGIN_PERCENT'),
 });
 
-app.get('/health', (_req, res) => {
-  res.json({
-    ok: true,
-    service: 'Quantum Dual V34 Linux',
-    edition: 'BINANCE_AUTO_FOREX_SIGNAL_ONLY',
-    mode: getSettings().appMode,
-    workspaceId,
-  });
-});
+app.get('/health', (_req, res) => res.json({
+  ok: true,
+  version: '0.3.0',
+  edition: 'BINANCE_AUTO_FOREX_SIGNAL_ONLY',
+  platform: 'linux',
+  forexExecution: 'SIGNAL_ONLY',
+  mt5: 'NOT_REQUIRED',
+  at: Date.now(),
+}));
 
 app.get('/api/state', async (_req, res) => {
-  try {
-    const settings = getSettings();
-    const allBinanceTrades = database.getRecentTrades(5000).filter((trade) => trade.broker === 'BINANCE');
-    const modeTrades = allBinanceTrades.filter((trade) => (trade.executionMode ?? 'REAL') === settings.appMode);
-    const activeCrypto = database.getActiveTrades('BINANCE')
-      .filter((trade) => (trade.executionMode ?? 'REAL') === settings.appMode);
-    const paper = paperBroker.getSummary();
-    const integrationStatuses = vault.getStatus(workspaceId);
-    const binanceIntegration = integrationStatuses.find((item) => item.provider === 'BINANCE');
-    const telegramIntegration = integrationStatuses.find((item) => item.provider === 'TELEGRAM');
-    const forexDataIntegration = integrationStatuses.find((item) => item.provider === 'TWELVE_DATA');
+  const settings = getSettings();
+  const allTrades = database.getAllTrades();
+  const modeCryptoTrades = allTrades.filter((trade) => trade.broker === 'BINANCE' && (trade.executionMode ?? 'REAL') === settings.appMode);
+  const activeCrypto = modeCryptoTrades.filter((trade) => ['PENDING', 'OPENING', 'OPEN', 'CLOSING', 'SYNC_REQUIRED'].includes(trade.state));
+  const cryptoHistory = modeCryptoTrades.filter((trade) => ['CLOSED', 'REJECTED', 'ERROR'].includes(trade.state)).slice(0, 500);
+  const paper = paperBroker.getSummary();
 
-    const brokerStatus: Record<string, unknown> = {
-      telegram: {
-        configured: telegram.isConfigured(),
-        connected: telegramIntegration?.lastTestOk === true,
-        masked: telegramIntegration?.maskedPrimary,
-        lastError: telegramIntegration?.lastError,
-      },
-      binance: {
-        configured: binance.hasCredentials(),
-        connected: binanceIntegration?.lastTestOk === true,
-        masked: binanceIntegration?.maskedPrimary,
-        lastError: binanceIntegration?.lastError,
-      },
-      forexData: {
-        provider: 'TWELVE_DATA',
-        configured: forexData.hasCredentials(),
-        connected: forexDataIntegration?.lastTestOk === true,
-        optional: true,
-        status: !forexData.hasCredentials()
-          ? 'PENDING'
-          : forexDataIntegration?.lastTestOk === true
-            ? 'CONNECTED'
-            : forexDataIntegration?.lastTestOk === false
-              ? 'ERROR'
-              : 'CONFIGURED_UNTESTED',
-        masked: forexDataIntegration?.maskedPrimary,
-        usage: forexData.getUsage(),
-        lastTestAt: forexDataIntegration?.lastTestAt,
-        lastError: forexDataIntegration?.lastError,
-      },
+  let binanceState: Record<string, unknown> = { configured: false, connected: false, mode: settings.appMode };
+  if (settings.appMode === 'PAPER') {
+    const activeMargin = paper.activeTrades.reduce((sum, trade) => sum + Math.max(0, Number(trade.marginUsed || 0)), 0);
+    binanceState = {
+      configured: true, connected: true, mode: 'PAPER', paper: true, asset: 'USDT',
+      balance: paper.balance, availableBalance: Math.max(0, paper.balance - activeMargin), equity: paper.equity,
+      openPositions: paper.activeTrades.length,
     };
-
-    if (settings.appMode === 'PAPER') {
-      const allocatedMargin = paper.activeTrades.reduce((sum, trade) => sum + Math.max(0, Number(trade.marginUsed ?? 0)), 0);
-      brokerStatus.binance = {
-        configured: true,
-        connected: true,
-        paper: true,
-        asset: 'USDT',
-        balance: paper.balance,
-        availableBalance: Math.max(0, paper.balance - allocatedMargin),
-        equity: paper.equity,
-        openPositions: paper.activeTrades.length,
+  } else if (binance.isConfigured()) {
+    try {
+      const [account, positionMode] = await Promise.all([binance.getAccount(), binance.getPositionMode()]);
+      const usdt = account.assets?.find((asset) => asset.asset === 'USDT');
+      binanceState = {
+        configured: true, connected: true, mode: settings.appMode, asset: 'USDT',
+        balance: Number(usdt?.walletBalance ?? 0), availableBalance: Number(usdt?.availableBalance ?? account.availableBalance ?? 0),
+        totalWalletBalance: account.totalWalletBalance, totalMarginBalance: account.totalMarginBalance,
+        totalUnrealizedProfit: account.totalUnrealizedProfit, dualSidePosition: Boolean(positionMode.dualSidePosition),
       };
-    } else if (settings.cryptoEnabled && binance.hasCredentials()) {
-      try {
-        const [positions, balance, availableBalance] = await Promise.all([
-          binance.getPositions(),
-          binance.getFuturesBalance(),
-          binance.getAvailableBalance(),
-        ]);
-        brokerStatus.binance = {
-          configured: true,
-          connected: true,
-          asset: 'USDT',
-          balance,
-          availableBalance,
-          openPositions: positions.length,
-          masked: binanceIntegration?.maskedPrimary,
-        };
-      } catch (error) {
-        brokerStatus.binance = {
-          configured: true,
-          connected: false,
-          error: errorMessage(error),
-          masked: binanceIntegration?.maskedPrimary,
-        };
-      }
+    } catch (error) {
+      binanceState = { configured: true, connected: false, mode: settings.appMode, error: errorMessage(error) };
     }
-
-    res.json({
-      workspaceId,
-      edition: 'BINANCE_AUTO_FOREX_SIGNAL_ONLY',
-      settings,
-      integrations: integrationStatuses.filter((item) => item.provider !== 'MT5'),
-      brokerStatus,
-      riskGuard: riskGuard.load(),
-      emergencyStop: loadEngineState('emergencyStop'),
-      scanners: {
-        crypto: loadEngineState('cryptoScanner'),
-        forex: loadEngineState('forexScanner'),
-        paper: loadEngineState('paperBroker'),
-      },
-      active: {
-        crypto: activeCrypto,
-        cryptoUniqueSymbols: [...new Set(activeCrypto.map((trade) => trade.symbol))],
-      },
-      recentTrades: modeTrades.slice(0, 250),
-      metrics: {
-        global: calculateMetrics(modeTrades, 'BINANCE'),
-        crypto: calculateMetrics(modeTrades, 'BINANCE'),
-        cryptoBySymbol: metricsBySymbol(modeTrades, 'BINANCE'),
-        cryptoByStrategy: metricsByStrategy(modeTrades, 'BINANCE'),
-      },
-      paper,
-      opportunities: {
-        crypto: loadTopCryptoOpportunities(10),
-      },
-      forexSignals: loadForexSignals(50),
-      forexSignalStats: loadForexSignalStats(),
-      forexDiagnostics: loadForexDiagnostics(),
-    });
-  } catch (error) {
-    res.status(500).json({ error: errorMessage(error) });
   }
+
+  const forexCredential = vault.getState('TWELVE_DATA');
+  const telegramCredential = vault.getState('TELEGRAM');
+  const forexDataState = {
+    provider: 'TWELVE_DATA',
+    configured: forexCredential.configured,
+    connected: forexCredential.lastTestOk === true,
+    optional: true,
+    status: !forexCredential.configured ? 'PENDING' : forexCredential.lastTestOk === true ? 'CONNECTED' : forexCredential.lastTestOk === false ? 'ERROR' : 'CONFIGURED_UNTESTED',
+    masked: forexCredential.masked,
+    usage: forexData.getUsage(),
+    lastTestAt: forexCredential.lastTestAt,
+    lastError: forexCredential.lastError,
+  };
+
+  res.json({
+    ok: true,
+    settings,
+    brokerStatus: {
+      binance: binanceState,
+      forexData: forexDataState,
+      telegram: {
+        configured: telegramCredential.configured,
+        connected: telegramCredential.lastTestOk === true,
+        optional: true,
+        masked: telegramCredential.masked,
+        lastTestAt: telegramCredential.lastTestAt,
+        lastError: telegramCredential.lastError,
+      },
+    },
+    scanners: {
+      crypto: loadEngineState('cryptoScanner'),
+      forex: loadEngineState('forexScanner'),
+      paper: loadEngineState('paperBroker'),
+    },
+    paper,
+    crypto: {
+      active: activeCrypto,
+      history: cryptoHistory,
+      metrics: metrics.fromTrades(modeCryptoTrades),
+      topOpportunities: loadTopCryptoOpportunities(10),
+    },
+    forex: {
+      signals: loadForexSignals(50),
+      stats: loadForexSignalStats(),
+      performance: loadEngineState('forexSignalPerformance'),
+    },
+    forexDiagnostics: loadForexDiagnostics(),
+    risk: await riskGuard.evaluate(),
+    integrations: vault.listStates(),
+    at: Date.now(),
+  });
 });
 
 app.patch('/api/settings', (req, res) => {
   try {
     const patch = settingsPatchSchema.parse(req.body);
-    const next: EngineSettings = {
-      ...getSettings(),
-      ...patch,
-      forexExecutionMode: 'SIGNAL_ONLY',
-    };
-    next.maxConcurrentCryptoTrades = Math.min(10, next.maxConcurrentCryptoTrades);
-    next.forexSymbols = [...new Set(next.forexSymbols.map((symbol) => symbol.trim().toUpperCase().replace('/', '')).filter(Boolean))];
-    database.saveSettings(next);
+    const current = getSettings();
+    const next = { ...current, ...patch, forexExecutionMode: 'SIGNAL_ONLY' as const };
+    saveSettings(next);
     res.json({ ok: true, settings: next });
   } catch (error) {
     res.status(400).json({ error: errorMessage(error) });
@@ -266,61 +230,42 @@ app.patch('/api/settings', (req, res) => {
 app.post('/api/engine/start', async (_req, res) => {
   try {
     const settings = getSettings();
-    const risk = await riskGuard.evaluate();
-    if (risk.status === 'TRIPPED') return res.status(409).json({ error: 'RISK_KILL_SWITCH_TRIPPED', riskGuard: risk });
-
-    if (settings.appMode !== 'PAPER' && settings.cryptoEnabled) {
-      if (!binance.hasCredentials()) {
-        return res.status(409).json({ error: 'BINANCE_CREDENTIALS_REQUIRED_FOR_CRYPTO' });
-      }
-      try {
-        await binance.testConnection();
-      } catch (error) {
-        return res.status(409).json({
-          error: 'BINANCE_CONNECTION_REQUIRED_FOR_CRYPTO',
-          detail: errorMessage(error),
-        });
-      }
+    if (!settings.cryptoEnabled && !settings.forexEnabled) return res.status(400).json({ error: 'NO_DESK_ENABLED' });
+    if (settings.cryptoEnabled && settings.appMode !== 'PAPER') {
+      if (!binance.isConfigured()) return res.status(400).json({ error: 'BINANCE_REQUIRED_FOR_CRYPTO_MODE' });
+      const test = await binance.testConnection();
+      if (!test.ok) return res.status(400).json({ error: 'BINANCE_CONNECTION_FAILED' });
     }
-
-    const warnings: string[] = [];
-    if (settings.forexEnabled && !forexData.hasCredentials()) warnings.push('FOREX_DATA_PENDING');
-    if (settings.forexEnabled && !telegram.isConfigured()) warnings.push('FOREX_TELEGRAM_PENDING');
-
-    database.saveSettings({ ...settings, engineEnabled: true, forexExecutionMode: 'SIGNAL_ONLY' });
-    database.db.prepare(`
-      INSERT INTO engine_state(key, value, updated_at)
-      VALUES('emergencyStop', ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-    `).run(JSON.stringify({ active: false, clearedAt: Date.now() }), Date.now());
-    res.json({
-      ok: true,
-      engineEnabled: true,
-      forexExecutionMode: 'SIGNAL_ONLY',
-      forexReady: !settings.forexEnabled || (forexData.hasCredentials() && telegram.isConfigured()),
-      warnings,
-    });
+    if (settings.appMode === 'REAL' && !settings.riskKillSwitchEnabled) return res.status(400).json({ error: 'REAL_MODE_REQUIRES_RISK_KILL_SWITCH' });
+    saveSettings({ ...settings, engineEnabled: true, forexExecutionMode: 'SIGNAL_ONLY' });
+    res.json({ ok: true, settings: getSettings() });
   } catch (error) {
-    res.status(500).json({ error: errorMessage(error) });
+    res.status(400).json({ error: errorMessage(error) });
   }
 });
 
-app.post('/api/engine/pause', (_req, res) => {
-  database.saveSettings({ ...getSettings(), engineEnabled: false, forexExecutionMode: 'SIGNAL_ONLY' });
-  void telegram.alert(
-    'MOTOR PAUSADO',
-    'Se bloquearon nuevas entradas Binance y nuevas señales Forex. Las posiciones Binance existentes conservan sus SL/TP.',
-  ).catch(() => undefined);
-  res.json({ ok: true, engineEnabled: false });
+app.post('/api/engine/stop', (_req, res) => {
+  const settings = getSettings();
+  saveSettings({ ...settings, engineEnabled: false, forexExecutionMode: 'SIGNAL_ONLY' });
+  res.json({ ok: true, settings: getSettings() });
 });
 
 app.post('/api/emergency-stop', async (_req, res) => {
   try {
-    const result = await emergencyStop.trigger();
-    res.json({ ok: result.failed === 0, ...result });
+    res.json({ ok: true, ...(await emergencyStop.trigger('API_REQUEST')) });
   } catch (error) {
     res.status(500).json({ error: errorMessage(error) });
   }
+});
+
+registerIntegrationRoutes(app, {
+  vault,
+  binance,
+  telegram,
+  forexData,
+  onForexReady: async () => {
+    if (getSettings().engineEnabled) await forexScanner.runCycle();
+  },
 });
 
 app.post('/api/reconcile', async (_req, res) => {
@@ -353,7 +298,9 @@ app.post('/api/scanners/crypto/run', async (_req, res) => {
 
 app.post('/api/scanners/forex/run', async (_req, res) => {
   try {
-    await forexScanner.runCycle();
+    // Explicit diagnostic/manual scan is allowed with Engine OFF. It still remains
+    // SIGNAL_ONLY and never sends an order to MT5/Forex.
+    await forexScanner.runCycle(true);
     res.json({ ok: true, scanner: loadEngineState('forexScanner'), diagnostics: loadForexDiagnostics() });
   } catch (error) {
     res.status(500).json({ error: errorMessage(error) });
@@ -437,7 +384,7 @@ function loadForexSignals(limit: number): Opportunity[] {
 
 function loadForexSignalStats(): Record<string, number> {
   const dayAgo = Date.now() - 24 * 60 * 60_000;
-  const weekAgo = Date.now() - 7 * 24 * 60 * 60_000;
+  const weekAgo = Date.now() - 7 * 24 * 60_000;
   const sent24h = Number((database.db.prepare(`
     SELECT COUNT(*) AS n FROM telegram_events
     WHERE event_type='FOREX_SIGNAL' AND status='SENT' AND created_at >= ?
@@ -461,39 +408,41 @@ function loadForexDiagnostics(): Array<Record<string, unknown>> {
   });
 }
 
-function loadEngineState(key: string): unknown {
-  const row = database.db.prepare('SELECT value, updated_at FROM engine_state WHERE key = ?').get(key) as
-    | { value: string; updated_at: number }
-    | undefined;
-  if (!row) return null;
-  try { return { ...JSON.parse(row.value), updatedAt: row.updated_at }; }
-  catch { return { value: row.value, updatedAt: row.updated_at }; }
+function loadEngineState(key: string): any {
+  const row = database.db.prepare(`SELECT value FROM engine_state WHERE key=?`).get(key) as { value: string } | undefined;
+  if (!row) return {};
+  try { return JSON.parse(row.value); }
+  catch { return { status: 'INVALID_STATE', raw: row.value }; }
 }
 
-function errorMessage(error: unknown): string {
-  if (error instanceof z.ZodError) return error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
-  return error instanceof Error ? error.message : String(error);
-}
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
-const monitoringTimer = setInterval(() => {
-  void (async () => {
-    try {
-      await reconciler.runOnce();
-      await paperBroker.runOnce();
-      await riskGuard.evaluate();
-    } catch (error) {
-      console.error('[V34] monitoring error:', errorMessage(error));
+cryptoScanner.start();
+forexScanner.start();
+
+const monitor = setInterval(async () => {
+  try { await reconciler.runOnce(); } catch (error) { console.error('[V34] reconcile:', errorMessage(error)); }
+  try { await paperBroker.runOnce(); } catch (error) { console.error('[V34] paper:', errorMessage(error)); }
+  try {
+    const risk = await riskGuard.evaluate();
+    if (risk.triggered && getSettings().riskKillSwitchEnabled) {
+      saveSettings({ ...getSettings(), engineEnabled: false, forexExecutionMode: 'SIGNAL_ONLY' });
+      await telegram.systemAlert(`Risk guard triggered: ${risk.reason}`);
     }
-  })();
+  } catch (error) { console.error('[V34] risk guard:', errorMessage(error)); }
 }, 10_000);
-monitoringTimer.unref();
+monitor.unref();
 
-app.listen(env.PORT, '0.0.0.0', () => {
-  console.log(`[V34-LINUX] backend listening on 0.0.0.0:${env.PORT}`);
-  console.log(`[V34-LINUX] workspace=${workspaceId} mode=${getSettings().appMode} engine=${getSettings().engineEnabled ? 'ON' : 'OFF'}`);
-  console.log('[V34-LINUX] Crypto=BINANCE_AUTO · Paper=PERSISTENT_SIM_BROKER · Forex=TELEGRAM_SIGNAL_ONLY');
-  void reconciler.runOnce().then(() => paperBroker.runOnce()).then(() => riskGuard.evaluate()).catch((error) => console.error('[V34] initial monitor error:', errorMessage(error)));
-  paperBroker.start();
-  cryptoScanner.start();
-  forexScanner.start();
-});
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+function shutdown(signal: string): void {
+  console.log(`[V34] ${signal}; closing services.`);
+  clearInterval(monitor);
+  cryptoScanner.stop();
+  forexScanner.stop();
+  database.close();
+  process.exit(0);
+}
+
+app.listen(env.PORT, () => console.log(`[V34] Linux runtime listening on :${env.PORT} | Binance AUTO + Forex SIGNAL_ONLY`));
