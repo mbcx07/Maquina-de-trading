@@ -76,26 +76,37 @@ export class TelegramService {
 
   async forexSignal(opportunity: Opportunity, retestNumber = 1): Promise<void> {
     const rr = Math.abs(opportunity.takeProfit - opportunity.entry) / Math.max(Math.abs(opportunity.entry - opportunity.stopLoss), Number.EPSILON);
-    const reason = String(opportunity.metadata?.reason ?? 'Confluencia V34');
+    const reason = String(opportunity.metadata?.reason ?? 'Confluencia R11');
+    const orderType = String(opportunity.metadata?.orderType ?? 'LIMIT');
+    const isPending = Boolean(opportunity.metadata?.pendingRetest) || orderType.includes('LIMIT');
+    const pendingBars = Number(opportunity.metadata?.pendingBars ?? 3);
+    const expiresAt = Number(opportunity.metadata?.expiresAt ?? 0);
+    const expiryText = expiresAt > 0 ? new Date(expiresAt).toLocaleString('es-MX', { timeZone: 'America/Mazatlan' }) : `${pendingBars} velas M5`;
+
     await this.send([
       '📡 <b>SEÑAL FOREX · EJECUCIÓN MANUAL</b>',
       `<b>Par:</b> ${opportunity.symbol}`,
       `<b>Dirección:</b> ${opportunity.side}`,
-      `<b>Entrada referencia:</b> ${num(opportunity.entry)}`,
+      `<b>Orden:</b> ${escapeHtml(orderType)}`,
+      `<b>${isPending ? 'Entrada LIMIT (retest)' : 'Entrada'}:</b> ${num(opportunity.entry)}`,
       `<b>Stop Loss:</b> ${num(opportunity.stopLoss)}`,
       `<b>Take Profit:</b> ${num(opportunity.takeProfit)}`,
       opportunity.tp2 ? `<b>TP2:</b> ${num(opportunity.tp2)}` : '',
       opportunity.tp3 ? `<b>TP3:</b> ${num(opportunity.tp3)}` : '',
-      `<b>R:R:</b> 1:${rr.toFixed(2)}`,
+      `<b>R:R TP1:</b> 1:${rr.toFixed(2)}`,
       `<b>Timeframe:</b> ${opportunity.timeframe}`,
-      `<b>Confianza:</b> ${num(opportunity.confidence)}%`,
-      `<b>Rolling WR:</b> ${num(opportunity.rollingWinRate)}%`,
+      `<b>Confianza setup:</b> ${num(opportunity.confidence)}%`,
+      `<b>WR OOS modelo:</b> ${num(opportunity.rollingWinRate)}%`,
       `<b>Score:</b> ${num(opportunity.score)}`,
-      `<b>Retest:</b> #${retestNumber}`,
+      `<b>Setup:</b> #${retestNumber}`,
       `<b>Estrategia:</b> ${opportunity.strategy}`,
+      isPending ? `<b>Vence:</b> ${escapeHtml(expiryText)} · máximo ${pendingBars} velas M5` : '',
       `<b>Motivo:</b> ${escapeHtml(reason)}`,
       '',
-      '⚠️ <i>Señal informativa. V34 no abrirá operaciones Forex automáticamente.</i>',
+      isPending
+        ? '⏳ <b>NO entrar a mercado.</b> Colocar/esperar la LIMIT en el precio indicado. Si no toca la entrada antes del vencimiento, cancelar la señal.'
+        : '',
+      '⚠️ <i>Forex es solo señal informativa/manual. V34 no abre operaciones Forex automáticamente.</i>',
     ].filter(Boolean).join('\n'));
   }
 
