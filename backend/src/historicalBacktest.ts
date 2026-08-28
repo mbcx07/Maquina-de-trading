@@ -1,10 +1,14 @@
 import crypto from 'node:crypto';
 import { analyzeStructureStrategy, type Candle } from './analysis.js';
-import { analyzeStructureStrategyV335 } from './analysisV335.js';
 import { BinanceMarketDataClient } from './binanceMarket.js';
 import { TradingDatabase } from './database.js';
+import { calibrateR11Async } from './r11Calibration.js';
+import { evaluateConfigExternalR11, type R11Model, type R11Trade } from './highWinrateR11.js';
 import { Mt5BridgeClient } from './mt5.js';
 import type { Broker, EngineSettings, TradeSide } from './types.js';
+
+const DAY = 24 * 60 * 60_000;
+const R11_CALIBRATION_DAYS = 21;
 
 export interface HistoricalBacktestRequest {
   broker: Broker;
@@ -66,6 +70,22 @@ export interface HistoricalMetrics {
   costs: number;
 }
 
+export interface HistoricalModelAudit {
+  symbol: string;
+  ready: boolean;
+  status: string;
+  fallback: boolean;
+  score: number;
+  config?: R11Model['config'];
+  train?: R11Model['train'];
+  validation?: R11Model['validation'];
+  holdout?: R11Model['holdout'];
+  calibrationStart: number;
+  calibrationEnd: number;
+  evaluationStart: number;
+  evaluationEnd: number;
+}
+
 export interface HistoricalBacktestResult {
   runId: string;
   broker: Broker;
@@ -85,6 +105,8 @@ export interface HistoricalBacktestResult {
   splitTime: number;
   equityCurve: Array<{ time: number; equity: number; drawdownPct: number }>;
   bySymbol: Array<{ symbol: string; metrics: HistoricalMetrics }>;
+  modelAudit?: HistoricalModelAudit[];
+  methodology?: Record<string, unknown>;
 }
 
 export class HistoricalBacktestService {
@@ -130,32 +152,95 @@ export class HistoricalBacktestService {
     this.updateRun(id, 'RUNNING', { stage: 'LOADING_HISTORY', completed: 0, total: request.symbols.length }, startedAt);
 
     const candidates: HistoricalCandidate[] = [];
+    const modelAudit: HistoricalModelAudit[] = [];
     for (let index = 0; index < request.symbols.length; index++) {
-      const symbol = request.symbols[index].trim();
+      const symbol = request.symbols[index].trim().toUpperCase();
       this.updateRun(id, 'RUNNING', {
-        stage: 'ANALYZING_SYMBOLS',
+        stage: request.broker === 'BINANCE' ? 'CALIBRATING_R11_PRE_RANGE' : 'ANALYZING_SYMBOLS',
         symbol,
         completed: index,
         total: request.symbols.length,
         candidates: candidates.length,
       });
 
-      const { ltf, htf } = request.broker === 'BINANCE'
-        ? await this.binanceMarket.getDualHistoricalRange(symbol, request.startTime, request.endTime)
-        : await this.mt5.dualHistoricalRange(symbol, request.startTime, request.endTime);
+      if (request.broker === 'BINANCE') {
+        const calibrationStart = request.startTime - R11_CALIBRATION_DAYS * DAY;
+        const calibrationEnd = request.startTime - 1;
+        const { ltf, htf } = await this.binanceMarket.getDualHistoricalRange(symbol, calibrationStart, request.endTime);
+        const calibrationM5 = ltf.filter((candle) => candle.time >= calibrationStart && candle.time <= calibrationEnd);
+        const calibrationM15 = htf.filter((candle) => candle.time <= calibrationEnd);
 
-      candidates.push(...generateCandidates(request, symbol, ltf, htf));
+        if (calibrationM5.length < 3000 || calibrationM15.length < 500) {
+          modelAudit.push({
+            symbol,
+            ready: false,
+            status: `INSUFFICIENT_PRE_RANGE_HISTORY:m5=${calibrationM5.length}:m15=${calibrationM15.length}`,
+            fallback: false,
+            score: 0,
+            calibrationStart,
+            calibrationEnd,
+            evaluationStart: request.startTime,
+            evaluationEnd: request.endTime,
+          });
+        } else {
+          const model = await calibrateR11Async(calibrationM5, calibrationM15);
+          modelAudit.push({
+            symbol,
+            ready: model.ready,
+            status: model.status,
+            fallback: model.fallback,
+            score: Number.isFinite(model.score) ? model.score : 0,
+            config: model.ready ? model.config : undefined,
+            train: model.ready ? model.train : undefined,
+            validation: model.ready ? model.validation : undefined,
+            holdout: model.ready ? model.holdout : undefined,
+            calibrationStart,
+            calibrationEnd,
+            evaluationStart: request.startTime,
+            evaluationEnd: request.endTime,
+          });
+          if (model.ready) {
+            const evaluated = evaluateConfigExternalR11(ltf, htf, model.config, request.startTime, request.endTime);
+            candidates.push(...r11TradesToCandidates(symbol, evaluated.trades, model));
+          }
+        }
+      } else {
+        const { ltf, htf } = await this.mt5.dualHistoricalRange(symbol, request.startTime, request.endTime);
+        candidates.push(...generateLegacyMt5Candidates(request, symbol, ltf, htf));
+      }
+
       this.updateRun(id, 'RUNNING', {
-        stage: 'ANALYZING_SYMBOLS',
+        stage: request.broker === 'BINANCE' ? 'EVALUATING_R11_EXTERNAL_RANGE' : 'ANALYZING_SYMBOLS',
         symbol,
         completed: index + 1,
         total: request.symbols.length,
         candidates: candidates.length,
+        modelsReady: modelAudit.filter((row) => row.ready).length,
       });
     }
 
-    this.updateRun(id, 'RUNNING', { stage: 'PORTFOLIO_SIMULATION', completed: request.symbols.length, total: request.symbols.length, candidates: candidates.length });
+    this.updateRun(id, 'RUNNING', {
+      stage: 'PORTFOLIO_SIMULATION',
+      completed: request.symbols.length,
+      total: request.symbols.length,
+      candidates: candidates.length,
+      modelsReady: modelAudit.filter((row) => row.ready).length,
+    });
     const result = simulatePortfolio(id, request, candidates, this.getSettings());
+    result.modelAudit = request.broker === 'BINANCE' ? modelAudit : undefined;
+    result.methodology = request.broker === 'BINANCE'
+      ? {
+          strategy: 'R11_CALIBRATED_SWEEP_RETEST_M5_M15',
+          calibrationDays: R11_CALIBRATION_DAYS,
+          calibrationWindow: 'STRICTLY_BEFORE_SELECTED_RANGE',
+          selectedRangeRole: 'FULLY_OUT_OF_SAMPLE_EVALUATION',
+          entry: 'PENDING_RETEST_M5_UP_TO_3_BARS',
+          bias: 'M5_M15_ALIGNED',
+          lookAhead: false,
+          costsIncluded: true,
+          note: 'The selected date range never participates in model selection.',
+        }
+      : { strategy: 'LEGACY_MT5_BACKTEST' };
     const completedAt = Date.now();
     result.startedAt = startedAt;
     result.completedAt = completedAt;
@@ -166,7 +251,14 @@ export class HistoricalBacktestService {
       WHERE id=?
     `).run(
       JSON.stringify(result),
-      JSON.stringify({ stage: 'COMPLETED', completed: request.symbols.length, total: request.symbols.length, candidates: candidates.length, trades: result.executedTrades.length }),
+      JSON.stringify({
+        stage: 'COMPLETED',
+        completed: request.symbols.length,
+        total: request.symbols.length,
+        candidates: candidates.length,
+        trades: result.executedTrades.length,
+        modelsReady: modelAudit.filter((row) => row.ready).length,
+      }),
       startedAt,
       completedAt,
       completedAt,
@@ -217,7 +309,38 @@ export class HistoricalBacktestService {
   }
 }
 
-function generateCandidates(
+function r11TradesToCandidates(symbol: string, trades: R11Trade[], model: R11Model): HistoricalCandidate[] {
+  const oosConfidence = combinedModelWinRate(model);
+  return trades.map((trade, index) => {
+    const side: TradeSide = trade.direction > 0 ? 'BUY' : 'SELL';
+    const priceReturn = directionalReturnPct(side, trade.entry, trade.exit);
+    return {
+      id: `BINANCE-R11-${symbol}-${trade.fillTime}-${index}`,
+      broker: 'BINANCE',
+      symbol,
+      side,
+      strategy: 'CALIBRATED_SWEEP_RETEST_M5_M15_R11',
+      confidence: oosConfidence,
+      entryTime: trade.fillTime,
+      exitTime: trade.exitTime,
+      entry: trade.entry,
+      exit: trade.exit,
+      stopLoss: trade.sl,
+      takeProfit: trade.tp,
+      grossPriceReturnPct: priceReturn,
+      outcome: trade.reason === 'TP' ? 'WIN' : trade.reason === 'SL' ? 'LOSS' : priceReturn > 0 ? 'WIN' : priceReturn < 0 ? 'LOSS' : 'TIMEOUT',
+      exitReason: trade.reason === 'TP' ? 'TP' : trade.reason === 'SL' ? 'SL' : 'TIMEOUT',
+    };
+  });
+}
+
+function combinedModelWinRate(model: R11Model): number {
+  const trades = model.validation.trades + model.holdout.trades;
+  const wins = model.validation.wins + model.holdout.wins;
+  return trades > 0 ? wins / trades * 100 : model.train.winRate;
+}
+
+function generateLegacyMt5Candidates(
   request: HistoricalBacktestRequest,
   symbol: string,
   ltf: Candle[],
@@ -226,46 +349,31 @@ function generateCandidates(
   const sortedLtf = [...ltf].sort((a, b) => a.time - b.time);
   const sortedHtf = [...htf].sort((a, b) => a.time - b.time);
   const output: HistoricalCandidate[] = [];
-  const ltfMinutes = request.broker === 'BINANCE' ? 5 : 1;
-  const stepBars = Math.max(1, Math.ceil(request.scanStepMinutes / ltfMinutes));
-  const maxHoldBars = Math.max(1, Math.ceil(request.maxHoldMinutes / ltfMinutes));
+  const stepBars = Math.max(1, Math.ceil(request.scanStepMinutes));
+  const maxHoldBars = Math.max(1, Math.ceil(request.maxHoldMinutes));
   let zoneActive = false;
-  let cryptoBusyUntil = 0;
-  const startIndex = request.broker === 'BINANCE' ? 99 : 60;
 
-  for (let i = startIndex; i < sortedLtf.length - 2; i += stepBars) {
+  for (let i = 60; i < sortedLtf.length - 2; i += stepBars) {
     const current = sortedLtf[i];
     if (current.time < request.startTime || current.time > request.endTime) continue;
-    if (request.broker === 'BINANCE' && current.time < cryptoBusyUntil) continue;
-
     const htfEnd = upperBoundTime(sortedHtf, current.time);
-    if (request.broker === 'BINANCE' ? htfEnd < 210 : htfEnd < 200) continue;
-
-    const ltfWindow = request.broker === 'BINANCE'
-      ? sortedLtf.slice(i - 99, i + 1)
-      : sortedLtf.slice(Math.max(0, i - 259), i + 1);
-    const htfWindow = request.broker === 'BINANCE'
-      ? sortedHtf.slice(htfEnd - 210, htfEnd)
-      : sortedHtf.slice(Math.max(0, htfEnd - 260), htfEnd);
-    const signal = request.broker === 'BINANCE'
-      ? analyzeStructureStrategyV335(ltfWindow, htfWindow, symbol)
-      : analyzeStructureStrategy(ltfWindow, htfWindow, symbol);
-
+    if (htfEnd < 200) continue;
+    const ltfWindow = sortedLtf.slice(Math.max(0, i - 259), i + 1);
+    const htfWindow = sortedHtf.slice(Math.max(0, htfEnd - 260), htfEnd);
+    const signal = analyzeStructureStrategy(ltfWindow, htfWindow, symbol);
     if (!signal) {
       zoneActive = false;
       continue;
     }
-
-    if (request.broker === 'MT5' && zoneActive) continue;
+    if (zoneActive) continue;
     zoneActive = true;
 
     const resolved = resolveSignal(signal.side, signal.entry, signal.stopLoss, signal.takeProfit, sortedLtf, i, maxHoldBars);
     if (!resolved) continue;
-    if (request.broker === 'BINANCE') cryptoBusyUntil = resolved.exitTime;
-
+    const priceReturn = directionalReturnPct(signal.side, signal.entry, resolved.exit);
     output.push({
-      id: `${request.broker}-${symbol}-${current.time}-${signal.side}`,
-      broker: request.broker,
+      id: `MT5-${symbol}-${current.time}-${signal.side}`,
+      broker: 'MT5',
       symbol,
       side: signal.side,
       strategy: signal.strategy,
@@ -276,12 +384,11 @@ function generateCandidates(
       exit: resolved.exit,
       stopLoss: signal.stopLoss,
       takeProfit: signal.takeProfit,
-      grossPriceReturnPct: directionalReturnPct(signal.side, signal.entry, resolved.exit),
-      outcome: resolved.reason === 'TP' ? 'WIN' : resolved.reason === 'SL' ? 'LOSS' : resolved.exit === signal.entry ? 'TIMEOUT' : directionalReturnPct(signal.side, signal.entry, resolved.exit) >= 0 ? 'WIN' : 'LOSS',
+      grossPriceReturnPct: priceReturn,
+      outcome: resolved.reason === 'TP' ? 'WIN' : resolved.reason === 'SL' ? 'LOSS' : priceReturn >= 0 ? 'WIN' : 'LOSS',
       exitReason: resolved.reason,
     });
   }
-
   return output;
 }
 
@@ -391,11 +498,11 @@ function simulatePortfolio(
   settleUntil(Number.MAX_SAFE_INTEGER);
   const splitTime = request.startTime + (request.endTime - request.startTime) * 0.70;
   const metrics = calculateHistoricalMetrics(executed, request.initialBalance, curve);
-  const inSampleTrades = executed.filter((trade) => trade.entryTime < splitTime);
-  const outSampleTrades = executed.filter((trade) => trade.entryTime >= splitTime);
-  const inSample = calculateHistoricalMetrics(inSampleTrades, request.initialBalance);
-  const oosStart = inSampleTrades.length ? inSampleTrades.at(-1)!.equityAfterExit : request.initialBalance;
-  const outOfSample = calculateHistoricalMetrics(outSampleTrades, oosStart);
+  const first70 = executed.filter((trade) => trade.entryTime < splitTime);
+  const final30 = executed.filter((trade) => trade.entryTime >= splitTime);
+  const inSample = calculateHistoricalMetrics(first70, request.initialBalance);
+  const final30Start = first70.length ? first70.at(-1)!.equityAfterExit : request.initialBalance;
+  const outOfSample = calculateHistoricalMetrics(final30, final30Start);
   const bySymbol = [...new Set(executed.map((trade) => trade.symbol))]
     .map((symbol) => ({ symbol, metrics: calculateHistoricalMetrics(executed.filter((trade) => trade.symbol === symbol), request.initialBalance) }))
     .sort((a, b) => b.metrics.netProfit - a.metrics.netProfit);
@@ -503,7 +610,7 @@ function validateRequest(request: HistoricalBacktestRequest): void {
   if (!(request.scanStepMinutes >= 1 && request.scanStepMinutes <= 60)) throw new Error('BACKTEST_SCAN_STEP_INVALID');
   if (!(request.maxHoldMinutes >= 1 && request.maxHoldMinutes <= 1440)) throw new Error('BACKTEST_MAX_HOLD_INVALID');
   if (request.endTime <= request.startTime) throw new Error('BACKTEST_RANGE_INVALID');
-  if (request.endTime - request.startTime > 31 * 24 * 60 * 60 * 1000) throw new Error('BACKTEST_MAX_RANGE_31_DAYS');
+  if (request.endTime - request.startTime > 31 * DAY) throw new Error('BACKTEST_MAX_RANGE_31_DAYS');
 }
 
 function mapRun(row: Record<string, unknown>): Record<string, unknown> {
