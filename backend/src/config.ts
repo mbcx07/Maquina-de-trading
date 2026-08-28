@@ -27,16 +27,17 @@ const envSchema = z.object({
   CRYPTO_REQUESTED_LEVERAGE: z.coerce.number().int().min(1).max(125).default(20),
   CRYPTO_MIN_STOP_PRICE_PCT: z.coerce.number().positive().max(25).default(1),
   CRYPTO_MIN_TAKE_PROFIT_PRICE_PCT: z.coerce.number().positive().max(50).default(1.5),
-  CRYPTO_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(74),
+  CRYPTO_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(70),
   CRYPTO_MIN_WINRATE: z.coerce.number().min(0).max(100).default(64),
   PAPER_INITIAL_BALANCE: z.coerce.number().positive().default(100),
   PAPER_ROUND_TRIP_COST_PCT: z.coerce.number().min(0).max(10).default(0.12),
 
-  // Forex desk: currencies + XAUUSD. NAS100 was removed by product request.
+  // R11 Forex desk: currencies + XAUUSD only. A pending retest survives 3x M5 bars,
+  // so the default polling interval must not be slower than the signal lifecycle.
   FOREX_SYMBOLS: z.string().default('EURUSD,GBPUSD,USDJPY,EURJPY,AUDUSD,USDCAD,USDCHF,NZDUSD,GBPJPY,AUDJPY,EURGBP,EURAUD,XAUUSD'),
-  FOREX_SIGNAL_SCAN_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).default(60),
+  FOREX_SIGNAL_SCAN_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).default(5),
   FOREX_SIGNALS_PER_CYCLE: z.coerce.number().int().min(1).max(20).default(6),
-  FOREX_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(74),
+  FOREX_MIN_CONFIDENCE: z.coerce.number().min(0).max(100).default(70),
   FOREX_MIN_WINRATE: z.coerce.number().min(0).max(100).default(64),
 
   DAILY_LOSS_LIMIT_PCT: z.coerce.number().positive().max(100).default(5),
