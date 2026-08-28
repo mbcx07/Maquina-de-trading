@@ -1,13 +1,12 @@
 import crypto from 'node:crypto';
-import { opportunityScore } from './analysis.js';
-import { analyzeStructureStrategyV335, runRollingBacktestV335 } from './analysisV335.js';
 import { TradingDatabase } from './database.js';
 import { ForexDataClient } from './forexData.js';
 import { ForexSignalTracker } from './forexSignalTracker.js';
+import { calibrateR11Async } from './r11Calibration.js';
+import { latestPendingSetupR11, type R11Model } from './highWinrateR11.js';
 import { TradingRepository } from './repositories.js';
 import { TelegramService } from './telegram.js';
 import type { EngineSettings, Opportunity } from './types.js';
-import type { Candle, AnalysisSignal } from './analysis.js';
 
 const LEGACY_DEFAULTS = ['EURUSD', 'GBPUSD', 'USDJPY', 'EURJPY'];
 const EXPANDED_DEFAULTS = [
@@ -16,23 +15,28 @@ const EXPANDED_DEFAULTS = [
   'GBPJPY', 'AUDJPY', 'EURGBP', 'EURAUD',
   'XAUUSD',
 ];
-const BASIC_DAILY_BUDGET_TARGET = 720;
-const ENTRY_TIMEFRAME_MINUTES = 5;
-const RECENT_SETUP_LOOKBACK_MINUTES = 60;
+const MODEL_TTL_MS = 24 * 60 * 60_000;
+const R11_STRATEGY = 'R11_CALIBRATED_SWEEP_RETEST_M5_M15';
+const M5_MS = 5 * 60_000;
 
-interface TriggeredSignal {
-  signal: AnalysisSignal;
-  ltfWindow: Candle[];
-  htfWindow: Candle[];
-  candleTime: number;
-  triggerLagMinutes: number;
+interface ForexModelCache {
+  symbol: string;
+  dataSymbol: string;
+  calibratedAt: number;
+  model: R11Model;
+}
+
+interface ScanResult {
+  opportunity: Opportunity | null;
+  modelReady: boolean;
+  modelStatus: string;
+  calibratedNow: boolean;
 }
 
 export class ForexMarketScanner {
   private running = false;
   private stopped = false;
   private timer: NodeJS.Timeout | null = null;
-  private signalZoneActive = new Map<string, boolean>();
   private retestCount = new Map<string, number>();
   private readonly tracker: ForexSignalTracker;
 
@@ -63,15 +67,15 @@ export class ForexMarketScanner {
     this.sanitizeSettings();
     const settings = this.getSettings();
     if (!settings.engineEnabled && !forceManual) {
-      this.saveState({ status: 'PAUSED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, timeframe: '5m/15m', strategy: 'R10_HIGH_WR_SWEEP', performance: this.tracker.summary(2000) });
+      this.saveState({ status: 'PAUSED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, timeframe: '5m/15m', strategy: R11_STRATEGY, performance: this.tracker.summary(2000) });
       return;
     }
     if (!settings.forexEnabled) {
-      this.saveState({ status: 'DISABLED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, timeframe: '5m/15m', strategy: 'R10_HIGH_WR_SWEEP', performance: this.tracker.summary(2000) });
+      this.saveState({ status: 'DISABLED', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, timeframe: '5m/15m', strategy: R11_STRATEGY, performance: this.tracker.summary(2000) });
       return;
     }
     if (!this.market.hasCredentials()) {
-      this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, timeframe: '5m/15m', strategy: 'R10_HIGH_WR_SWEEP', performance: this.tracker.summary(2000) });
+      this.saveState({ status: 'WAITING_FOREX_DATA_KEY', completedAt: Date.now(), mode: 'SIGNAL_ONLY', automatic: true, timeframe: '5m/15m', strategy: R11_STRATEGY, performance: this.tracker.summary(2000) });
       return;
     }
 
@@ -81,34 +85,35 @@ export class ForexMarketScanner {
       .map((symbol) => normalizeDisplaySymbol(symbol))
       .filter((symbol) => Boolean(symbol) && symbol !== 'NAS100'))];
     const freshSignals: Opportunity[] = [];
+    const modelStates: Array<{ symbol: string; ready: boolean; status: string; calibratedNow: boolean }> = [];
     let errors = 0;
     let scanned = 0;
     let rateLimited = false;
     const startedAt = Date.now();
-    const effectiveIntervalMinutes = this.effectiveIntervalMinutes(settings, symbols.length);
+    const effectiveIntervalMinutes = Math.max(1, Number(settings.forexSignalScanIntervalMinutes || 5));
 
     try {
       this.saveState({
         status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
-        timeframe: '5m/15m', strategy: 'R10_HIGH_WR_SWEEP',
+        timeframe: '5m/15m', strategy: R11_STRATEGY,
         trigger: forceManual ? 'API_FORCE' : 'AUTOMATIC',
         telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, total: symbols.length, scanned: 0, signals: 0, errors: 0,
         configuredIntervalMinutes: settings.forexSignalScanIntervalMinutes,
         effectiveIntervalMinutes,
         estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
-        requestModel: 'ONE_M5_REQUEST_DERIVE_M15',
-        recentSetupLookbackMinutes: RECENT_SETUP_LOOKBACK_MINUTES,
+        requestModel: 'M5_LIVE_PLUS_DAILY_R11_CALIBRATION',
+        pendingRetestBars: 3,
         symbols,
         performance: this.tracker.summary(2000),
       });
 
-      for (let index = 0; index < symbols.length; index++) {
-        const symbol = symbols[index];
+      for (const symbol of symbols) {
         try {
-          const signal = await this.scanSymbol(symbol);
+          const result = await this.scanSymbol(symbol);
+          modelStates.push({ symbol, ready: result.modelReady, status: result.modelStatus, calibratedNow: result.calibratedNow });
           this.clearSymbolError(symbol);
-          if (signal) freshSignals.push(signal);
+          if (result.opportunity) freshSignals.push(result.opportunity);
           scanned++;
         } catch (error) {
           errors++;
@@ -122,7 +127,7 @@ export class ForexMarketScanner {
 
         this.saveState({
           status: 'SCANNING', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
-          timeframe: '5m/15m', strategy: 'R10_HIGH_WR_SWEEP',
+          timeframe: '5m/15m', strategy: R11_STRATEGY,
           trigger: forceManual ? 'API_FORCE' : 'AUTOMATIC',
           telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
           startedAt, total: symbols.length, scanned, current: symbol,
@@ -130,8 +135,11 @@ export class ForexMarketScanner {
           configuredIntervalMinutes: settings.forexSignalScanIntervalMinutes,
           effectiveIntervalMinutes,
           estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
-          requestModel: 'ONE_M5_REQUEST_DERIVE_M15',
-          recentSetupLookbackMinutes: RECENT_SETUP_LOOKBACK_MINUTES,
+          requestModel: 'M5_LIVE_PLUS_DAILY_R11_CALIBRATION',
+          pendingRetestBars: 3,
+          modelsReady: modelStates.filter((row) => row.ready).length,
+          modelsRejected: modelStates.filter((row) => !row.ready).length,
+          modelStates: modelStates.slice(-20),
           performance: this.tracker.summary(2000),
         });
       }
@@ -160,6 +168,7 @@ export class ForexMarketScanner {
         }
       }
 
+      const readyModels = modelStates.filter((row) => row.ready).length;
       const status = rateLimited
         ? 'DATA_LIMIT'
         : scanned > 0 && errors === scanned
@@ -169,13 +178,15 @@ export class ForexMarketScanner {
             : 'IDLE';
       const diagnostic = rateLimited
         ? 'TWELVE_DATA_RATE_LIMIT_OR_DAILY_QUOTA'
-        : freshSignals.length === 0 && errors === 0
-          ? 'NO_ACTIONABLE_R10_M5_M15_SETUP_IN_RECENT_WINDOW'
-          : undefined;
+        : readyModels === 0 && modelStates.length > 0
+          ? 'NO_POSITIVE_R11_MODEL_IN_CONFIGURED_FOREX_SYMBOLS'
+          : freshSignals.length === 0 && errors === 0
+            ? 'R11_MODELS_READY_BUT_NO_PENDING_RETEST_SETUP_NOW'
+            : undefined;
 
       this.saveState({
         status, mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
-        timeframe: '5m/15m', strategy: 'R10_HIGH_WR_SWEEP',
+        timeframe: '5m/15m', strategy: R11_STRATEGY,
         trigger: forceManual ? 'API_FORCE' : 'AUTOMATIC',
         telegramDelivery: telegramConfigured ? 'ENABLED' : 'DISABLED_NOT_CONFIGURED',
         startedAt, completedAt: Date.now(), total: symbols.length, scanned,
@@ -185,8 +196,11 @@ export class ForexMarketScanner {
         effectiveIntervalMinutes,
         estimatedDailyCredits: estimateDailyCredits(symbols.length, effectiveIntervalMinutes),
         nextScanMinutes: effectiveIntervalMinutes,
-        requestModel: 'ONE_M5_REQUEST_DERIVE_M15',
-        recentSetupLookbackMinutes: RECENT_SETUP_LOOKBACK_MINUTES,
+        requestModel: 'M5_LIVE_PLUS_DAILY_R11_CALIBRATION',
+        pendingRetestBars: 3,
+        modelsReady: readyModels,
+        modelsRejected: modelStates.filter((row) => !row.ready).length,
+        modelStates,
         symbols,
         performance: this.tracker.summary(2000),
       });
@@ -202,7 +216,7 @@ export class ForexMarketScanner {
     } catch (error) {
       this.saveState({
         status: 'ERROR', mode: 'SIGNAL_ONLY', provider: 'TWELVE_DATA', automatic: true,
-        timeframe: '5m/15m', strategy: 'R10_HIGH_WR_SWEEP',
+        timeframe: '5m/15m', strategy: R11_STRATEGY,
         error: error instanceof Error ? error.message : String(error), at: Date.now(),
         performance: this.tracker.summary(2000),
       });
@@ -211,68 +225,116 @@ export class ForexMarketScanner {
 
     if (!this.stopped) {
       const settings = this.getSettings();
-      const delayMinutes = this.effectiveIntervalMinutes(settings, settings.forexSymbols.length);
+      const delayMinutes = Math.max(1, Number(settings.forexSignalScanIntervalMinutes || 5));
       this.timer = setTimeout(() => void this.loop(), delayMinutes * 60_000);
       this.timer.unref();
     }
   }
 
-  private async scanSymbol(symbol: string): Promise<Opportunity | null> {
+  private async scanSymbol(symbol: string): Promise<ScanResult> {
+    const cached = await this.ensureModel(symbol);
+    if (!cached.model.ready) {
+      return { opportunity: null, modelReady: false, modelStatus: cached.model.status, calibratedNow: cached.calibratedNow };
+    }
+
     const { ltf, htf, dataSymbol } = await this.market.dualRates(symbol);
-    if (ltf.length < 100 || htf.length < 210) {
-      throw new Error(`FOREX_INSUFFICIENT_CANDLES:${symbol}:${dataSymbol}:m5=${ltf.length}:m15=${htf.length}`);
-    }
-
     this.tracker.updateFromCandles(symbol, ltf);
-    const triggered = findLatestActionableSignal(ltf, htf, symbol, RECENT_SETUP_LOOKBACK_MINUTES);
-    if (!triggered) {
-      this.signalZoneActive.set(symbol, false);
-      return null;
+    const setup = latestPendingSetupR11(ltf, htf, cached.model.config, cached.model.config.pendingBars);
+    if (!setup) {
+      return { opportunity: null, modelReady: true, modelStatus: cached.model.status, calibratedNow: cached.calibratedNow };
     }
-    if (this.signalZoneActive.get(symbol) === true) return null;
 
-    const currentPrice = ltf.at(-1)!.close;
-    const rebased = rebaseSignalAtCurrentPrice(triggered.signal, currentPrice);
-    if (!rebased) return null;
-
-    // Validate with the deeper M5/M15 series, not only the 100-bar trigger window.
-    const backtest = runRollingBacktestV335(symbol, ltf, htf);
-    const rollingWinRate = backtest.tradesEvaluated < 3
-      ? Math.max(rebased.confidence, backtest.winRate)
-      : backtest.winRate;
+    const risk = setup.direction > 0 ? setup.entry - setup.sl : setup.sl - setup.entry;
+    if (!(risk > 0)) return { opportunity: null, modelReady: true, modelStatus: cached.model.status, calibratedNow: cached.calibratedNow };
+    const side = setup.direction > 0 ? 'BUY' as const : 'SELL' as const;
+    const direction = setup.direction > 0 ? 1 : -1;
+    const confidence = Math.round(clamp(setup.quality, 70, 96));
+    const oos = combinedOos(cached.model);
     const settings = this.getSettings();
-    if (rebased.confidence < settings.forexMinSignalConfidence || rollingWinRate < settings.forexMinRollingWinRate) {
-      // Do not arm the dedupe zone for a setup that was not admitted; the next closed
-      // M5 candle may improve the rolling evidence enough to become actionable.
-      this.signalZoneActive.set(symbol, false);
-      return null;
+    if (confidence < settings.forexMinSignalConfidence || oos.winRate < settings.forexMinRollingWinRate) {
+      return { opportunity: null, modelReady: true, modelStatus: cached.model.status, calibratedNow: cached.calibratedNow };
     }
-    this.signalZoneActive.set(symbol, true);
 
-    const score = opportunityScore(rebased, backtest, 60);
+    const score = clamp(oos.winRate * 0.65 + confidence * 0.25 + Math.min(10, Math.max(0, oos.profitFactor - 1) * 5), 0, 100);
+    const expiresAt = setup.signalTime + (cached.model.config.pendingBars + 1) * M5_MS;
     const fingerprint = sha256([
-      'FOREX-R10-M5-M15', symbol, dataSymbol, rebased.side, rebased.strategy, String(triggered.candleTime),
-      roundKey(rebased.stopLoss), roundKey(rebased.takeProfit),
+      'FOREX-R11-PENDING-RETEST', symbol, dataSymbol, side, String(setup.signalTime),
+      roundKey(setup.entry), roundKey(setup.sl), roundKey(setup.tp),
     ].join('|'));
 
-    return {
+    const opportunity: Opportunity = {
       id: `OP-FX-${fingerprint.slice(0, 24)}`,
       signalId: `SIG-FX-${fingerprint.slice(0, 24)}`,
       signalFingerprint: fingerprint,
-      broker: 'MT5', symbol, side: rebased.side, timeframe: '5m/15m', strategy: rebased.strategy,
-      confidence: rebased.confidence, rollingWinRate, expectancy: backtest.expectancyPct, score,
-      entry: rebased.entry, stopLoss: rebased.stopLoss, takeProfit: rebased.takeProfit,
-      tp2: rebased.tp2, tp3: rebased.tp3, createdAt: Date.now(),
+      broker: 'MT5',
+      symbol,
+      side,
+      timeframe: '5m/15m',
+      strategy: 'CALIBRATED_SWEEP_RETEST_M5_M15_R11',
+      confidence,
+      rollingWinRate: oos.winRate,
+      expectancy: oos.expectancyR,
+      score,
+      entry: setup.entry,
+      stopLoss: setup.sl,
+      takeProfit: setup.tp,
+      tp2: setup.entry + direction * risk,
+      tp3: setup.entry + direction * risk * 1.5,
+      createdAt: Date.now(),
       metadata: {
-        executionMode: 'SIGNAL_ONLY', dataProvider: 'TWELVE_DATA', dataSymbol,
-        reason: rebased.reason, atr: rebased.atr, backtest,
-        rollingWinRateSource: backtest.tradesEvaluated < 3 ? 'CALIBRATING_CONFIDENCE_FLOOR' : 'ROLLING_BACKTEST_R10',
-        candleTime: triggered.candleTime, triggerLagMinutes: triggered.triggerLagMinutes,
-        reanchoredAtCurrentPrice: triggered.triggerLagMinutes > 0,
-        decisionWindows: { m5: 100, m15: 210, rollingM5: ltf.length },
-        targetProfile: 'TP1_0.60R_TP2_1.00R_TP3_1.50R',
+        executionMode: 'SIGNAL_ONLY',
+        dataProvider: 'TWELVE_DATA',
+        dataSymbol,
+        orderType: setup.direction > 0 ? 'BUY_LIMIT' : 'SELL_LIMIT',
+        pendingRetest: true,
+        pendingBars: cached.model.config.pendingBars,
+        expiresAt,
+        signalTime: setup.signalTime,
+        sweepExtreme: setup.sweepExtreme,
+        liquidityLevel: setup.liquidity,
+        reason: `R11 sweep/reclaim + MSS confirmado; esperar retest LIMIT ${roundKey(setup.entry)}`,
+        modelStatus: cached.model.status,
+        modelFallback: cached.model.fallback,
+        modelConfig: cached.model.config,
+        modelTrain: cached.model.train,
+        modelValidation: cached.model.validation,
+        modelHoldout: cached.model.holdout,
+        oos,
+        targetProfile: `TP1_${cached.model.config.rr.toFixed(2)}R_TP2_1.00R_TP3_1.50R`,
       },
     };
+
+    return { opportunity, modelReady: true, modelStatus: cached.model.status, calibratedNow: cached.calibratedNow };
+  }
+
+  private async ensureModel(symbol: string): Promise<ForexModelCache & { calibratedNow: boolean }> {
+    const existing = this.loadModel(symbol);
+    if (existing && Date.now() - existing.calibratedAt < MODEL_TTL_MS) return { ...existing, calibratedNow: false };
+
+    const deep = await this.market.dualRatesCalibration(symbol);
+    const model = await calibrateR11Async(deep.ltf, deep.htf);
+    const row: ForexModelCache = {
+      symbol,
+      dataSymbol: deep.dataSymbol,
+      calibratedAt: Date.now(),
+      model,
+    };
+    this.saveModel(row);
+    return { ...row, calibratedNow: true };
+  }
+
+  private loadModel(symbol: string): ForexModelCache | null {
+    const row = this.database.db.prepare(`SELECT value FROM engine_state WHERE key=?`).get(`forexR11Model:${symbol}`) as { value: string } | undefined;
+    if (!row) return null;
+    try { return JSON.parse(row.value) as ForexModelCache; }
+    catch { return null; }
+  }
+
+  private saveModel(model: ForexModelCache): void {
+    this.database.db.prepare(`
+      INSERT INTO engine_state(key, value, updated_at) VALUES(?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+    `).run(`forexR11Model:${model.symbol}`, JSON.stringify(model), Date.now());
   }
 
   private sanitizeSettings(): void {
@@ -281,23 +343,17 @@ export class ForexMarketScanner {
       .map(normalizeDisplaySymbol)
       .filter((symbol) => Boolean(symbol) && symbol !== 'NAS100');
     const symbols = sameSet(normalized, LEGACY_DEFAULTS) ? EXPANDED_DEFAULTS : [...new Set(normalized)];
+    const migrateInterval = settings.forexSignalScanIntervalMinutes === 60 || settings.forexSignalScanIntervalMinutes === 30;
     const next: EngineSettings = {
       ...settings,
       forexSymbols: symbols.length ? symbols : EXPANDED_DEFAULTS,
       forexMinRollingWinRate: settings.forexMinRollingWinRate === 70 ? 64 : settings.forexMinRollingWinRate,
-      forexMinSignalConfidence: settings.forexMinSignalConfidence === 75 ? 74 : settings.forexMinSignalConfidence,
-      forexSignalScanIntervalMinutes: settings.forexSignalScanIntervalMinutes === 60 ? 30 : settings.forexSignalScanIntervalMinutes,
+      forexMinSignalConfidence: settings.forexMinSignalConfidence === 75 || settings.forexMinSignalConfidence === 74 ? 70 : settings.forexMinSignalConfidence,
+      forexSignalScanIntervalMinutes: migrateInterval ? 5 : settings.forexSignalScanIntervalMinutes,
       forexSignalsPerCycle: Math.max(6, settings.forexSignalsPerCycle),
       forexExecutionMode: 'SIGNAL_ONLY',
     };
-    const changed = JSON.stringify(next) !== JSON.stringify(settings);
-    if (changed) this.database.saveSettings(next);
-  }
-
-  private effectiveIntervalMinutes(settings: EngineSettings, symbolCount: number): number {
-    const configured = Math.max(1, Number(settings.forexSignalScanIntervalMinutes || 30));
-    const minimumForDailyBudget = Math.ceil(Math.max(1, symbolCount) * 1440 / BASIC_DAILY_BUDGET_TARGET);
-    return Math.max(configured, minimumForDailyBudget);
+    if (JSON.stringify(next) !== JSON.stringify(settings)) this.database.saveSettings(next);
   }
 
   private wasSent(fingerprint: string): boolean {
@@ -335,59 +391,17 @@ export class ForexMarketScanner {
   }
 }
 
-function findLatestActionableSignal(ltf: Candle[], htf: Candle[], symbol: string, lookbackMinutes: number): TriggeredSignal | null {
-  const lastIndex = ltf.length - 1;
-  const lookbackBars = Math.max(1, Math.ceil(lookbackMinutes / ENTRY_TIMEFRAME_MINUTES));
-  const firstIndex = Math.max(99, lastIndex - lookbackBars);
-  const currentPrice = ltf[lastIndex]?.close ?? 0;
-
-  for (let i = lastIndex; i >= firstIndex; i--) {
-    const ltfWindow = ltf.slice(i - 99, i + 1);
-    if (ltfWindow.length !== 100) continue;
-    const candleTime = ltf[i].time;
-    const eligibleHtf = htf.filter((candle) => candle.time <= candleTime).slice(-210);
-    if (eligibleHtf.length !== 210) continue;
-    const signal = analyzeStructureStrategyV335(ltfWindow, eligibleHtf, symbol);
-    if (!signal || !isStillActionable(signal, currentPrice)) continue;
-    return {
-      signal, ltfWindow, htfWindow: eligibleHtf, candleTime,
-      triggerLagMinutes: Math.max(0, Math.round((ltf[lastIndex].time - candleTime) / 60_000)),
-    };
-  }
-  return null;
-}
-
-function isStillActionable(signal: AnalysisSignal, currentPrice: number): boolean {
-  if (!(currentPrice > 0)) return false;
-  const risk = Math.abs(signal.entry - signal.stopLoss);
-  if (!(risk > 0)) return false;
-  if (signal.side === 'BUY') {
-    if (currentPrice <= signal.stopLoss || currentPrice >= signal.takeProfit) return false;
-    const progress = currentPrice - signal.entry;
-    return progress <= risk * 0.45 && progress >= -risk * 0.35;
-  }
-  if (currentPrice >= signal.stopLoss || currentPrice <= signal.takeProfit) return false;
-  const progress = signal.entry - currentPrice;
-  return progress <= risk * 0.45 && progress >= -risk * 0.35;
-}
-
-function rebaseSignalAtCurrentPrice(signal: AnalysisSignal, currentPrice: number): AnalysisSignal | null {
-  if (!(currentPrice > 0)) return null;
-  const originalRisk = Math.abs(signal.entry - signal.stopLoss);
-  const newRisk = signal.side === 'BUY' ? currentPrice - signal.stopLoss : signal.stopLoss - currentPrice;
-  if (!(originalRisk > 0) || !(newRisk > 0)) return null;
-
-  const tp1R = Math.abs(signal.takeProfit - signal.entry) / originalRisk;
-  const tp2R = Math.abs(signal.tp2 - signal.entry) / originalRisk;
-  const tp3R = Math.abs(signal.tp3 - signal.entry) / originalRisk;
-  const direction = signal.side === 'BUY' ? 1 : -1;
+function combinedOos(model: R11Model) {
+  const trades = model.validation.trades + model.holdout.trades;
+  const wins = model.validation.wins + model.holdout.wins;
+  const grossWinR = model.validation.grossWinR + model.holdout.grossWinR;
+  const grossLossR = model.validation.grossLossR + model.holdout.grossLossR;
+  const sumR = model.validation.sumR + model.holdout.sumR;
   return {
-    ...signal,
-    entry: currentPrice,
-    takeProfit: currentPrice + direction * newRisk * tp1R,
-    tp2: currentPrice + direction * newRisk * tp2R,
-    tp3: currentPrice + direction * newRisk * tp3R,
-    reason: `${signal.reason}_RECENT_ACTIONABLE`,
+    trades,
+    winRate: trades ? wins / trades * 100 : 0,
+    expectancyR: trades ? sumR / trades : 0,
+    profitFactor: grossLossR < 0 ? grossWinR / Math.abs(grossLossR) : grossWinR > 0 ? 99 : 0,
   };
 }
 
@@ -403,7 +417,7 @@ function sameSet(a: string[], b: string[]): boolean {
 }
 
 function estimateDailyCredits(symbolCount: number, intervalMinutes: number): number {
-  return Math.ceil(Math.max(1, symbolCount) * (1440 / Math.max(1, intervalMinutes)));
+  return Math.ceil(Math.max(1, symbolCount) * (1440 / Math.max(1, intervalMinutes)) + symbolCount);
 }
 function isRateLimitError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -411,3 +425,4 @@ function isRateLimitError(error: unknown): boolean {
 }
 function sha256(value: string): string { return crypto.createHash('sha256').update(value).digest('hex'); }
 function roundKey(value: number): string { return Number(value.toPrecision(10)).toString(); }
+function clamp(value: number, min: number, max: number): number { return Math.max(min, Math.min(max, value)); }
