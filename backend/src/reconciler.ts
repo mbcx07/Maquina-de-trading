@@ -43,8 +43,10 @@ export class PositionReconciler {
       const live = exchangeBySymbol.get(trade.symbol.toUpperCase());
 
       if (live) {
+        // A reversal close stays CLOSING while Binance still reports the position;
+        // do not accidentally reset it to OPEN during the close/reconcile race.
         this.repository.patchTrade(trade.id, {
-          state: 'OPEN',
+          state: trade.state === 'CLOSING' ? 'CLOSING' : 'OPEN',
           entryPrice: live.entryPrice || trade.entryPrice,
           leverage: live.leverage || trade.leverage,
           unrealizedPnl: live.unrealizedProfit,
@@ -82,7 +84,7 @@ export class PositionReconciler {
     const closeTime = closingFills.length
       ? Math.max(...closingFills.map((fill) => fill.time))
       : afterOpen.at(-1)?.time ?? Date.now();
-    const closeReason = inferPriceCloseReason(exitPrice, trade);
+    const closeReason = preserveSystemCloseReason(trade) ?? inferPriceCloseReason(exitPrice, trade);
 
     this.repository.patchTrade(trade.id, {
       state: 'CLOSED',
@@ -112,7 +114,10 @@ export class PositionReconciler {
     const closed = this.database.getRecentTrades(2000).find((trade) => trade.id === tradeId);
     if (!closed) return;
 
-    const metrics = calculateMetrics(this.database.getRecentTrades(5000), 'BINANCE');
+    const mode = this.getSettings().appMode;
+    const modeTrades = this.database.getRecentTrades(5000)
+      .filter((trade) => trade.broker === 'BINANCE' && (trade.executionMode ?? 'REAL') === mode);
+    const metrics = calculateMetrics(modeTrades, 'BINANCE');
     await this.telegram.tradeClosed(closed, metrics.netProfit, metrics.winRate).catch((error) => {
       this.database.db.prepare(`
         INSERT INTO telegram_events(trade_id, event_type, status, error, created_at)
@@ -120,6 +125,11 @@ export class PositionReconciler {
       `).run(tradeId, error instanceof Error ? error.message : String(error), Date.now());
     });
   }
+}
+
+function preserveSystemCloseReason(trade: TradeRecord): CloseReason | null {
+  if (trade.closeReason === 'REVERSAL' || trade.closeReason === 'EMERGENCY_RISK') return trade.closeReason;
+  return null;
 }
 
 function weightedAverageExit(fills: Array<{ price: number; qty: number }>): number | null {
