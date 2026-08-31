@@ -30,13 +30,15 @@ export class PositionReconciler {
   }
 
   private async reconcileBinance(): Promise<void> {
+    const settings = this.getSettings();
     const [positions, balance] = await Promise.all([
       this.binance.getPositions(),
       this.binance.getFuturesBalance(),
     ]);
 
     const exchangeBySymbol = new Map(positions.map((position) => [position.symbol.toUpperCase(), position]));
-    const activeLocal = this.database.getActiveTrades('BINANCE');
+    const activeLocal = this.database.getActiveTrades('BINANCE')
+      .filter((trade) => (trade.executionMode ?? 'REAL') === settings.appMode);
 
     for (const trade of activeLocal) {
       if (trade.state === 'PENDING' || trade.state === 'OPENING') continue;
@@ -57,7 +59,8 @@ export class PositionReconciler {
       await this.finalizeBinanceTrade(trade);
     }
 
-    const refreshed = this.database.getActiveTrades('BINANCE');
+    const refreshed = this.database.getActiveTrades('BINANCE')
+      .filter((trade) => (trade.executionMode ?? 'REAL') === settings.appMode);
     const unrealized = refreshed.reduce((sum, trade) => sum + Number(trade.unrealizedPnl || 0), 0);
     this.repository.recordEquitySnapshot('BINANCE', balance, balance + unrealized, 0, unrealized);
   }
@@ -98,6 +101,7 @@ export class PositionReconciler {
     });
     this.database.addTradeEvent(trade.id, 'TRADE_CLOSED_RECONCILED', {
       source: 'BINANCE',
+      executionMode: trade.executionMode,
       exitPrice,
       realizedPnl,
       commission,
