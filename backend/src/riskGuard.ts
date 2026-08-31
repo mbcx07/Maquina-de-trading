@@ -15,6 +15,9 @@ export interface RiskStatus {
   dailyDrawdownPct?: number;
   maxDrawdownPct?: number;
   checkedAt: number;
+  // /api/state already exposes riskGuard.load(); nesting the dynamic reversal
+  // state here avoids changing the stable Linux HTTP runtime/bootstrap.
+  reversalGuard?: unknown;
 }
 
 export class PortfolioRiskGuard {
@@ -115,15 +118,30 @@ export class PortfolioRiskGuard {
       | { value: string }
       | undefined;
     if (!row) return null;
-    try { return JSON.parse(row.value) as RiskStatus; } catch { return null; }
+    try {
+      const status = JSON.parse(row.value) as RiskStatus;
+      const reversalRow = this.database.db.prepare(`SELECT value FROM engine_state WHERE key = 'cryptoReversalGuard'`).get() as
+        | { value: string }
+        | undefined;
+      if (!reversalRow) return status;
+      try {
+        return { ...status, reversalGuard: JSON.parse(reversalRow.value) as unknown };
+      } catch {
+        return status;
+      }
+    } catch {
+      return null;
+    }
   }
 
   private save(status: RiskStatus): RiskStatus {
+    const persisted = { ...status };
+    delete persisted.reversalGuard;
     this.database.db.prepare(`
       INSERT INTO engine_state(key, value, updated_at)
       VALUES('riskGuard', ?, ?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-    `).run(JSON.stringify(status), status.checkedAt);
+    `).run(JSON.stringify(persisted), status.checkedAt);
     return status;
   }
 }
