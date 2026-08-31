@@ -87,15 +87,70 @@ export class CryptoReversalGuard {
 
       for (const trade of active) {
         try {
-          const [{ ltf, htf }, mark] = await Promise.all([
-            this.market.getDualKlines(trade.symbol),
-            this.market.getMarkPrice(trade.symbol),
-          ]);
-          const assessment = assessCryptoReversal(ltf, htf, trade.side);
+          // Emergency loss protection must not depend on M5/M15 data availability.
+          // Mark Price is fetched and evaluated first; technical reversal data is
+          // only required for the score-based rules.
+          const mark = await this.market.getMarkPrice(trade.symbol);
           const grossPnl = pricePnl(trade, mark);
           const roePct = tradeRoePct(trade, mark, grossPnl);
-          const decision = decideGuardAction(assessment, roePct);
+          this.repository.patchTrade(trade.id, { unrealizedPnl: grossPnl });
 
+          const emergency = decideGuardAction({ score: 0 }, roePct);
+          if (emergency.action === 'CLOSE_EMERGENCY') {
+            const reasons = ['ROE_EMERGENCY_THRESHOLD'];
+            positions.push({
+              tradeId: trade.id,
+              symbol: trade.symbol,
+              side: trade.side,
+              roePct,
+              reversalScore: 0,
+              level: 'EMERGENCY',
+              action: emergency.action,
+              reasons,
+            });
+            this.database.addTradeEvent(trade.id, 'REVERSAL_GUARD_CHECK', {
+              mark,
+              roePct,
+              reversalScore: 0,
+              level: 'EMERGENCY',
+              action: emergency.action,
+              reasons,
+            });
+            const block = setCryptoReversalBlock(
+              this.database,
+              settings.appMode,
+              trade.symbol,
+              emergency.blockMs,
+              emergency.closeReason,
+              0,
+            );
+            const closed = await this.closeTrade(trade, mark, grossPnl, emergency.closeReason, liveMap);
+            if (closed) closeRequested++;
+            await this.notifyCloseDecision(trade, roePct, 0, reasons, block.blockedUntil, emergency.closeReason, closed);
+            continue;
+          }
+
+          let assessment: CryptoReversalAssessment;
+          try {
+            const { ltf, htf } = await this.market.getDualKlines(trade.symbol);
+            assessment = assessCryptoReversal(ltf, htf, trade.side);
+          } catch (error) {
+            errors.push({ symbol: trade.symbol, error: `REVERSAL_DATA:${message(error)}` });
+            positions.push({
+              tradeId: trade.id,
+              symbol: trade.symbol,
+              side: trade.side,
+              roePct,
+              reversalScore: 0,
+              level: 'DATA_ERROR',
+              action: 'NONE',
+              reasons: ['REVERSAL_DATA_UNAVAILABLE'],
+            });
+            this.database.addTradeEvent(trade.id, 'REVERSAL_GUARD_DATA_ERROR', { mark, roePct, error: message(error) });
+            continue;
+          }
+
+          const decision = decideGuardAction(assessment, roePct);
           positions.push({
             tradeId: trade.id,
             symbol: trade.symbol,
@@ -107,7 +162,6 @@ export class CryptoReversalGuard {
             reasons: assessment.reasons,
           });
 
-          this.repository.patchTrade(trade.id, { unrealizedPnl: grossPnl });
           this.database.addTradeEvent(trade.id, 'REVERSAL_GUARD_CHECK', {
             mark,
             roePct,
@@ -141,20 +195,22 @@ export class CryptoReversalGuard {
           );
           const closed = await this.closeTrade(trade, mark, grossPnl, decision.closeReason, liveMap);
           if (closed) closeRequested++;
-
-          await this.telegram.alert(
-            decision.closeReason === 'EMERGENCY_RISK' ? 'REVERSAL GUARD · CIERRE EMERGENCIA' : 'REVERSAL GUARD · CIERRE',
-            [
-              `${trade.symbol} ${trade.side}`,
-              `ROE: ${roePct.toFixed(2)}%`,
-              `Score reversión: ${assessment.score}/100`,
-              `Motivo: ${decision.closeReason}`,
-              `Bloqueado hasta: ${new Date(block.blockedUntil).toLocaleString('es-MX')}`,
-              assessment.reasons.length ? `Confluencias: ${assessment.reasons.join(' · ')}` : '',
-            ].filter(Boolean).join('\n'),
-          ).catch(() => undefined);
+          await this.notifyCloseDecision(
+            trade,
+            roePct,
+            assessment.score,
+            assessment.reasons,
+            block.blockedUntil,
+            decision.closeReason,
+            closed,
+          );
         } catch (error) {
-          errors.push({ symbol: trade.symbol, error: message(error) });
+          const detail = message(error);
+          errors.push({ symbol: trade.symbol, error: detail });
+          await this.telegram.alert(
+            'REVERSAL GUARD · ERROR',
+            `${trade.symbol}: ${detail}`,
+          ).catch(() => undefined);
         }
       }
 
@@ -214,7 +270,8 @@ export class CryptoReversalGuard {
         closeReason,
         closeTime: now,
       });
-      this.database.db.prepare(`DELETE FROM paper_trade_cursor WHERE trade_id=?`).run(trade.id);
+      try { this.database.db.prepare(`DELETE FROM paper_trade_cursor WHERE trade_id=?`).run(trade.id); }
+      catch { /* Paper schema may still be initializing during process bootstrap. */ }
       this.database.addTradeEvent(trade.id, 'REVERSAL_PAPER_CLOSE', {
         exitPrice: mark,
         grossPnl,
@@ -258,6 +315,32 @@ export class CryptoReversalGuard {
       side: closeSide,
     });
     return true;
+  }
+
+  private async notifyCloseDecision(
+    trade: TradeRecord,
+    roePct: number,
+    score: number,
+    reasons: string[],
+    blockedUntil: number,
+    closeReason: Extract<CloseReason, 'REVERSAL' | 'EMERGENCY_RISK'>,
+    closeConfirmedOrRequested: boolean,
+  ): Promise<void> {
+    const title = closeConfirmedOrRequested
+      ? closeReason === 'EMERGENCY_RISK' ? 'REVERSAL GUARD · CIERRE EMERGENCIA' : 'REVERSAL GUARD · CIERRE'
+      : 'REVERSAL GUARD · CIERRE NO CONFIRMADO';
+    await this.telegram.alert(
+      title,
+      [
+        `${trade.symbol} ${trade.side}`,
+        `ROE: ${roePct.toFixed(2)}%`,
+        `Score reversión: ${score}/100`,
+        `Motivo: ${closeReason}`,
+        closeConfirmedOrRequested ? 'Cierre PAPER confirmado / orden REAL solicitada.' : 'No se encontró posición live; requiere reconciliación.',
+        `Bloqueado hasta: ${new Date(blockedUntil).toLocaleString('es-MX')}`,
+        reasons.length ? `Confluencias: ${reasons.join(' · ')}` : '',
+      ].filter(Boolean).join('\n'),
+    ).catch(() => undefined);
   }
 
   private shouldWarn(mode: EngineSettings['appMode'], symbol: string): boolean {
