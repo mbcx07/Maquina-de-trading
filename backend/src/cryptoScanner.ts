@@ -104,7 +104,7 @@ export class CryptoMarketScanner {
         qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified], minQuoteVolume24h: 2_000_000,
         auditProgress: { status: audit.status, completed: audit.completed ?? 0, total: audit.total ?? 0, current: audit.current },
         scanned: 0, opportunities: 0, selected: 0, executed: 0, errors: 0,
-        reversalProtection: 'DYNAMIC_ALL_ELIGIBLE_AND_OPEN_POSITIONS',
+        reversalProtection: 'ADVISORY_DYNAMIC_ALL_OPEN_STRUCTURAL_SL_FAILSAFE',
         exitModel: EXIT_MODEL,
       });
 
@@ -124,7 +124,7 @@ export class CryptoMarketScanner {
           qualifiedUniverse: qualified.size, qualifiedSymbols: [...qualified], scanned,
           current: chunk.at(-1) ?? null, opportunities: opportunities.length, selected: 0, executed: 0, errors,
           auditProgress: { status: audit.status, completed: audit.completed ?? 0, total: audit.total ?? 0, current: audit.current },
-          reversalProtection: 'DYNAMIC_ALL_ELIGIBLE_AND_OPEN_POSITIONS',
+          reversalProtection: 'ADVISORY_DYNAMIC_ALL_OPEN_STRUCTURAL_SL_FAILSAFE',
           exitModel: EXIT_MODEL,
         });
         if (i + chunkSize < symbols.length) await sleep(450);
@@ -147,13 +147,13 @@ export class CryptoMarketScanner {
         scanned, opportunities: opportunities.length, selected: result.selected.crypto.length, executed, errors,
         lastExecutionErrors: executionErrors.slice(-8),
         diagnostic: opportunities.length === 0
-          ? 'NO_R11_RETEST_TOUCH_OR_REVERSAL_VETO_NOW'
+          ? 'NO_R11_RETEST_TOUCH_NOW'
           : result.selected.crypto.length === 0
             ? 'NO_FREE_SLOT_OR_SELECTION_FILTER'
             : executed === 0 && executionErrors.length
               ? 'EXECUTION_REJECTED'
               : undefined,
-        reversalProtection: 'DYNAMIC_ALL_ELIGIBLE_AND_OPEN_POSITIONS',
+        reversalProtection: 'ADVISORY_DYNAMIC_ALL_OPEN_STRUCTURAL_SL_FAILSAFE',
         exitModel: EXIT_MODEL,
       });
     } catch (error) {
@@ -180,6 +180,9 @@ export class CryptoMarketScanner {
 
   private async scanSymbol(symbol: string, liquidityScore: number): Promise<Opportunity | null> {
     const settings = this.getSettings();
+    // This block only comes from the structural-stop fail-safe. The reversal score
+    // itself is deliberately NOT an admission veto because the external benchmark
+    // showed that thresholds 30-60 disproportionately removed winning R11 trades.
     const activeBlock = getCryptoReversalBlock(this.database, settings.appMode, symbol);
     if (activeBlock) return null;
 
@@ -196,17 +199,14 @@ export class CryptoMarketScanner {
     if (!signal) return null;
 
     const reversal = assessCryptoReversal(ltf, htf, signal.side);
-    if (reversal.score >= 50) return null;
-
     const rollingWinRate = approved.external.winRate;
     if (rollingWinRate < settings.cryptoMinRollingWinRate || signal.confidence < settings.cryptoMinSignalConfidence) return null;
 
     const pfBonus = Math.min(10, Math.max(0, approved.external.profitFactor - 1) * 5);
     const expectancyBonus = Math.min(10, Math.max(0, approved.external.expectancyPct) * 20);
-    const reversalPenalty = reversal.score >= 30 ? Math.min(12, (reversal.score - 29) * 0.6) : 0;
     const score = Math.max(0, Math.min(100,
       rollingWinRate * 0.65 + signal.confidence * 0.25 + pfBonus + expectancyBonus +
-      Math.max(0, Math.min(100, liquidityScore)) * 0.001 - reversalPenalty,
+      Math.max(0, Math.min(100, liquidityScore)) * 0.001,
     ));
     const fingerprint = sha256([
       'BINANCE-R11-RETEST', symbol, signal.side, String(setup.signalTime),
@@ -253,7 +253,7 @@ export class CryptoMarketScanner {
         reversalLevelAtEntry: reversal.level,
         reversalReasonsAtEntry: reversal.reasons,
         reversalComponentsAtEntry: reversal.components,
-        reversalRule: 'SCORE_GTE_50_BLOCK_ENTRY_SCORE_30_49_PENALIZE',
+        reversalRule: 'OBSERVATIONAL_ONLY_NO_ENTRY_VETO_FROM_SCORE',
         exitModel: EXIT_MODEL,
         targetProfile: `TP1_${approved.model.config.rr.toFixed(2)}R_TP2_1.00R_TP3_1.50R`,
         exitDisplay,
