@@ -1,0 +1,27 @@
+name: R11 Reversal Guard Benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - 'backend/src/cryptoReversal.ts'
+      - 'backend/src/cryptoReversalGuard.ts'
+      - 'backend/src/reversalGuardBenchmark.ts'
+      - '.github/workflows/reversal-guard-benchmark.yml'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npx tsx src/reversalGuardBenchmark.ts
