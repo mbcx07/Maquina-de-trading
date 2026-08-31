@@ -1,11 +1,14 @@
 import crypto from 'node:crypto';
 import { BinanceUsdmClient } from './binance.js';
+import { getCryptoReversalBlock } from './cryptoReversalStore.js';
 import { TradingDatabase } from './database.js';
 import { calculateMetrics } from './metrics.js';
 import { TradingRepository } from './repositories.js';
 import { calculateCryptoSizing, normalizeBinanceOrderSize } from './risk.js';
 import { TelegramService } from './telegram.js';
 import type { EngineSettings, Opportunity, TradeRecord, TradeSide } from './types.js';
+
+const R11_EXIT_MODEL = 'R11_PENDING_RETEST_STRUCTURAL';
 
 export class CryptoExecutionService {
   constructor(
@@ -26,6 +29,15 @@ export class CryptoExecutionService {
     if (opportunity.rollingWinRate < settings.cryptoMinRollingWinRate) throw new Error('CRYPTO_WINRATE_FILTER');
 
     this.repository.saveSignal(opportunity);
+
+    // Second-line defense: a symbol may become blocked after scanner selection but
+    // before the order is actually placed. Never let that race reopen a reversal.
+    const reversalBlock = getCryptoReversalBlock(this.database, settings.appMode, opportunity.symbol);
+    if (reversalBlock) {
+      const reason = `CRYPTO_REVERSAL_BLOCKED_UNTIL_${reversalBlock.blockedUntil}`;
+      this.repository.rejectOpportunity(opportunity.id, reason);
+      throw new Error(`${reason}:${reversalBlock.reason}:score=${reversalBlock.score}`);
+    }
 
     const activeLocal = this.database.getActiveTrades('BINANCE')
       .filter((trade) => (trade.executionMode ?? 'REAL') === settings.appMode);
@@ -55,8 +67,8 @@ export class CryptoExecutionService {
       ? settings.cryptoRequestedLeverage
       : await this.binance.getMaxAllowedLeverage(opportunity.symbol);
 
-    // The stop price is the V33.5 structural invalidation level. Leverage affects
-    // notional/margin PnL only; it never divides or multiplies the trigger price.
+    // R11 stop is structural invalidation around the calibrated retest. Leverage
+    // changes notional/margin PnL only; it never rewrites the trigger price.
     const sizing = calculateCryptoSizing({
       futuresBalance,
       marginPctPerTrade: settings.cryptoMarginPctPerTrade,
@@ -121,7 +133,9 @@ export class CryptoExecutionService {
         score: opportunity.score,
         executionMode: settings.appMode,
         risk: sizing,
-        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
+        exitModel: R11_EXIT_MODEL,
+        reversalScoreAtEntry: opportunity.metadata?.reversalScoreAtEntry,
+        reversalLevelAtEntry: opportunity.metadata?.reversalLevelAtEntry,
         exitDisplayAtSignal: exitDisplay(opportunity.side, opportunity.entry, opportunity.stopLoss, opportunity.takeProfit, sizing.effectiveLeverage),
         exposure: {
           activeAllocatedMargin,
@@ -145,9 +159,8 @@ export class CryptoExecutionService {
       const orderId = String(order.orderId ?? order.clientOrderId ?? order.paper ?? `ORDER-${Date.now()}`);
       const fillPrice = Number(order.avgPrice || order.price || opportunity.entry) || opportunity.entry;
 
-      // Preserve the exact structural levels produced by the freshly revalidated signal.
-      // Rewriting them after fill changes the strategy. The display below recalculates
-      // the actual price distance/ROE from the fill so the UI remains truthful.
+      // Preserve the R11 structural levels produced at the retest. The display uses
+      // the actual fill only to report truthful distance/ROE after slippage.
       this.repository.patchTrade(id, {
         brokerOrderId: orderId,
         leverage,
@@ -160,7 +173,7 @@ export class CryptoExecutionService {
         leverage,
         fillPrice,
         executionMode: settings.appMode,
-        exitModel: 'V33.5_STRUCTURAL_PRICE_LEVELS',
+        exitModel: R11_EXIT_MODEL,
         exitDisplayAtFill: exitDisplay(opportunity.side, fillPrice, opportunity.stopLoss, opportunity.takeProfit, leverage),
       });
 
@@ -220,6 +233,7 @@ export class CryptoExecutionService {
         executionMode: settings.appMode,
         stopLoss: opportunity.stopLoss,
         takeProfit: opportunity.takeProfit,
+        exitModel: R11_EXIT_MODEL,
       });
 
       const opened = this.database.getActiveTrades('BINANCE').find((trade) => trade.id === id);
