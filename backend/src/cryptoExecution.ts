@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import { BinanceUsdmClient } from './binance.js';
+import { BinanceMarketDataClient } from './binanceMarket.js';
+import { CryptoReversalGuard } from './cryptoReversalGuard.js';
 import { getCryptoReversalBlock } from './cryptoReversalStore.js';
 import { TradingDatabase } from './database.js';
 import { calculateMetrics } from './metrics.js';
@@ -11,13 +13,32 @@ import type { EngineSettings, Opportunity, TradeRecord, TradeSide } from './type
 const R11_EXIT_MODEL = 'R11_PENDING_RETEST_STRUCTURAL';
 
 export class CryptoExecutionService {
+  private readonly reversalGuard: CryptoReversalGuard;
+
   constructor(
     private readonly database: TradingDatabase,
     private readonly repository: TradingRepository,
     private readonly binance: BinanceUsdmClient,
     private readonly telegram: TelegramService,
     private readonly getSettings: () => EngineSettings,
-  ) {}
+  ) {
+    // The guard is tied to the singleton executor lifecycle. It keeps protecting
+    // already-open positions even when engineEnabled=false, without changing the
+    // proven Linux runtime bootstrap.
+    this.reversalGuard = new CryptoReversalGuard(
+      database,
+      repository,
+      binance,
+      new BinanceMarketDataClient(getSettings),
+      telegram,
+      getSettings,
+    );
+    this.reversalGuard.start();
+  }
+
+  getReversalGuardState(): ReturnType<CryptoReversalGuard['load']> {
+    return this.reversalGuard.load();
+  }
 
   async execute(opportunity: Opportunity): Promise<TradeRecord> {
     if (opportunity.broker !== 'BINANCE') throw new Error('NOT_A_BINANCE_OPPORTUNITY');
