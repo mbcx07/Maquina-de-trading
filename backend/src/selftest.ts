@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import type { Candle } from './analysis.js';
 import { assessCryptoReversal } from './cryptoReversal.js';
-import { decideGuardAction } from './cryptoReversalGuard.js';
+import { decideAdvisoryAction, structuralStopBreached } from './cryptoReversalGuard.js';
 import { calibrateR11Async } from './r11Calibration.js';
 import { calculateCryptoSizing } from './risk.js';
 import { selectCryptoOpportunities, selectForexOpportunities } from './selection.js';
@@ -52,24 +52,20 @@ const activeTrade = (broker: 'BINANCE' | 'MT5', symbol: string, fingerprint: str
   updatedAt: now,
 });
 
-// Crypto: never repeat a symbol and never select more than ten.
 {
   const crypto = Array.from({ length: 11 }, (_, i) => opportunity('BINANCE', `COIN${i}USDT`, 100 - i));
   crypto.push(opportunity('BINANCE', 'COIN1USDT', 999, 'BETTER-COIN1'));
-
   const selected = selectCryptoOpportunities(crypto, {
     maxCryptoTrades: 10,
     maxForexTrades: 20,
     forexMaxEntriesPerSymbol: 0,
     activeTrades: [],
   });
-
   assert.equal(selected.length, 10);
   assert.equal(new Set(selected.map((item) => item.symbol)).size, 10);
   assert.equal(selected.find((item) => item.symbol === 'COIN1USDT')?.score, 999);
 }
 
-// Crypto: an already-open BTCUSDT cannot be selected again even with a higher score.
 {
   const selected = selectCryptoOpportunities(
     [opportunity('BINANCE', 'BTCUSDT', 999), opportunity('BINANCE', 'ETHUSDT', 90)],
@@ -80,11 +76,9 @@ const activeTrade = (broker: 'BINANCE' | 'MT5', symbol: string, fingerprint: str
       activeTrades: [activeTrade('BINANCE', 'BTCUSDT', 'BTC-OPEN')],
     },
   );
-
   assert.deepEqual(selected.map((item) => item.symbol), ['ETHUSDT']);
 }
 
-// Forex: same symbol may repeat when each retest has a different fingerprint.
 {
   const selected = selectForexOpportunities(
     [
@@ -99,12 +93,10 @@ const activeTrade = (broker: 'BINANCE' | 'MT5', symbol: string, fingerprint: str
       activeTrades: [],
     },
   );
-
   assert.equal(selected.length, 3);
   assert.equal(selected.every((item) => item.symbol === 'EURUSD'), true);
 }
 
-// Forex: exact same signal fingerprint is blocked, while a new retest remains eligible.
 {
   const selected = selectForexOpportunities(
     [
@@ -118,11 +110,9 @@ const activeTrade = (broker: 'BINANCE' | 'MT5', symbol: string, fingerprint: str
       activeTrades: [activeTrade('MT5', 'EURUSD', 'EUR-RETEST-1')],
     },
   );
-
   assert.deepEqual(selected.map((item) => item.signalFingerprint), ['EUR-RETEST-2']);
 }
 
-// Crypto sizing example: $100 balance, 1% margin, 20x => $1 margin and $20 notional.
 {
   const result = calculateCryptoSizing({
     futuresBalance: 100,
@@ -133,13 +123,11 @@ const activeTrade = (broker: 'BINANCE' | 'MT5', symbol: string, fingerprint: str
     stopLoss: 99,
     maxLossPctPerTrade: 10,
   });
-
   assert.equal(result.marginTarget, 1);
   assert.equal(result.effectiveLeverage, 20);
   assert.equal(result.targetNotional, 20);
 }
 
-// If the coin only permits 10x, effective leverage and notional fall automatically.
 {
   const result = calculateCryptoSizing({
     futuresBalance: 100,
@@ -150,46 +138,46 @@ const activeTrade = (broker: 'BINANCE' | 'MT5', symbol: string, fingerprint: str
     stopLoss: 99,
     maxLossPctPerTrade: 10,
   });
-
   assert.equal(result.effectiveLeverage, 10);
   assert.equal(result.targetNotional, 10);
 }
 
-// Dynamic Reversal Guard: a clear bearish M5/M15 environment must be strongly
-// adverse to an existing BUY, while the mirror bullish environment must not be.
+// Dynamic reversal scoring is diagnostic: strong adverse structure warns but does
+// not override R11's calibrated structural exit.
 {
   const bearishM5 = syntheticTrend(90, 130, -0.18, 5 * 60_000, true);
   const bearishM15 = syntheticTrend(230, 180, -0.12, 15 * 60_000, false);
   const adverse = assessCryptoReversal(bearishM5, bearishM15, 'BUY');
   assert.ok(adverse.score >= 50, `expected strong BUY reversal score, got ${adverse.score}`);
   assert.equal(adverse.level, 'STRONG');
+  assert.equal(decideAdvisoryAction(adverse), 'WARNING');
 
   const bullishM5 = syntheticTrend(90, 90, 0.18, 5 * 60_000, false);
   const bullishM15 = syntheticTrend(230, 90, 0.12, 15 * 60_000, false);
   const healthy = assessCryptoReversal(bullishM5, bullishM15, 'BUY');
   assert.ok(healthy.score < 30, `expected healthy BUY score below warning, got ${healthy.score}`);
+  assert.equal(decideAdvisoryAction(healthy), 'NONE');
 }
 
-// Guard action matrix from the production rules.
+// The only automatic Reversal Guard exit is a fail-safe after the validated
+// structural stop has already been crossed while the position remains open.
 {
-  assert.equal(decideGuardAction({ score: 10 }, -5).action, 'CLOSE_EMERGENCY');
-  assert.equal(decideGuardAction({ score: 50 }, 2).action, 'CLOSE_REVERSAL');
-  assert.equal(decideGuardAction({ score: 35 }, -3.1).action, 'CLOSE_PREVENTIVE');
-  assert.equal(decideGuardAction({ score: 35 }, -2).action, 'WARNING');
-  assert.equal(decideGuardAction({ score: 29 }, -4).action, 'NONE');
-  assert.equal(decideGuardAction({ score: 10 }, -5).closeReason, 'EMERGENCY_RISK');
-  assert.equal(decideGuardAction({ score: 50 }, 2).closeReason, 'REVERSAL');
+  assert.equal(structuralStopBreached({ side: 'BUY', stopLoss: 99 }, 99), true);
+  assert.equal(structuralStopBreached({ side: 'BUY', stopLoss: 99 }, 99.01), false);
+  assert.equal(structuralStopBreached({ side: 'SELL', stopLoss: 101 }, 101), true);
+  assert.equal(structuralStopBreached({ side: 'SELL', stopLoss: 101 }, 100.99), false);
+  assert.equal(decideAdvisoryAction({ score: 50 }), 'WARNING');
+  assert.equal(decideAdvisoryAction({ score: 35 }), 'WARNING');
+  assert.equal(decideAdvisoryAction({ score: 29 }), 'NONE');
 }
 
-// R11 worker must boot under the same Node/tsx runtime used in Docker. Empty history
-// returns immediately and validates worker loading/message plumbing without doing a full calibration.
 {
   const model = await calibrateR11Async([], []);
   assert.equal(model.ready, false);
   assert.equal(model.status, 'INSUFFICIENT_M5_HISTORY');
 }
 
-console.log('V34 R11 + Dynamic Reversal Guard selftest: OK');
+console.log('V34 R11 + Safe Dynamic Reversal Guard selftest: OK');
 
 function syntheticTrend(count: number, start: number, step: number, intervalMs: number, spikeLast: boolean): Candle[] {
   const baseTime = now - count * intervalMs;
