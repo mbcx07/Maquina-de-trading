@@ -9,7 +9,6 @@ import { TelegramService } from './telegram.js';
 import type { CloseReason, EngineSettings, TradeRecord, TradeSide } from './types.js';
 
 const FOUR_HOURS = 4 * 60 * 60_000;
-const ONE_HOUR = 60 * 60_000;
 const LOOP_MS = 30_000;
 const WARNING_COOLDOWN_MS = 30 * 60_000;
 
@@ -20,6 +19,7 @@ export interface CryptoReversalGuardState {
   evaluated: number;
   warnings: number;
   closeRequested: number;
+  policy: 'ADVISORY_REVERSAL_STRUCTURAL_SL_FAILSAFE';
   blockedSymbols: Array<{ symbol: string; blockedUntil: number; reason: string; score: number }>;
   positions: Array<{
     tradeId: string;
@@ -28,7 +28,7 @@ export interface CryptoReversalGuardState {
     roePct: number;
     reversalScore: number;
     level: string;
-    action: 'NONE' | 'WARNING' | 'CLOSE_EMERGENCY' | 'CLOSE_REVERSAL' | 'CLOSE_PREVENTIVE';
+    action: 'NONE' | 'WARNING' | 'CLOSE_EMERGENCY';
     reasons: string[];
   }>;
   errors: Array<{ symbol: string; error: string }>;
@@ -87,46 +87,48 @@ export class CryptoReversalGuard {
 
       for (const trade of active) {
         try {
-          // Emergency loss protection must not depend on M5/M15 data availability.
-          // Mark Price is fetched and evaluated first; technical reversal data is
-          // only required for the score-based rules.
+          // The only automatic guard exit is a redundancy layer for the already
+          // validated R11 structural stop. If the position is still OPEN after Mark
+          // Price has crossed that SL, the protective order did not remove it and
+          // the guard issues an emergency reduce-only close.
           const mark = await this.market.getMarkPrice(trade.symbol);
           const grossPnl = pricePnl(trade, mark);
           const roePct = tradeRoePct(trade, mark, grossPnl);
           this.repository.patchTrade(trade.id, { unrealizedPnl: grossPnl });
 
-          const emergency = decideGuardAction({ score: 0 }, roePct);
-          if (emergency.action === 'CLOSE_EMERGENCY') {
-            const reasons = ['ROE_EMERGENCY_THRESHOLD'];
+          if (structuralStopBreached(trade, mark)) {
+            const reasons = ['R11_STRUCTURAL_SL_BREACHED_POSITION_STILL_OPEN'];
             positions.push({
               tradeId: trade.id,
               symbol: trade.symbol,
               side: trade.side,
               roePct,
               reversalScore: 0,
-              level: 'EMERGENCY',
-              action: emergency.action,
+              level: 'FAILSAFE',
+              action: 'CLOSE_EMERGENCY',
               reasons,
             });
             this.database.addTradeEvent(trade.id, 'REVERSAL_GUARD_CHECK', {
+              policy: 'STRUCTURAL_SL_FAILSAFE',
               mark,
+              stopLoss: trade.stopLoss,
               roePct,
               reversalScore: 0,
-              level: 'EMERGENCY',
-              action: emergency.action,
+              level: 'FAILSAFE',
+              action: 'CLOSE_EMERGENCY',
               reasons,
             });
             const block = setCryptoReversalBlock(
               this.database,
               settings.appMode,
               trade.symbol,
-              emergency.blockMs,
-              emergency.closeReason,
+              FOUR_HOURS,
+              'EMERGENCY_RISK',
               0,
             );
-            const closed = await this.closeTrade(trade, mark, grossPnl, emergency.closeReason, liveMap);
+            const closed = await this.closeTrade(trade, mark, grossPnl, 'EMERGENCY_RISK', liveMap);
             if (closed) closeRequested++;
-            await this.notifyCloseDecision(trade, roePct, 0, reasons, block.blockedUntil, emergency.closeReason, closed);
+            await this.notifyCloseDecision(trade, roePct, reasons, block.blockedUntil, closed);
             continue;
           }
 
@@ -150,7 +152,7 @@ export class CryptoReversalGuard {
             continue;
           }
 
-          const decision = decideGuardAction(assessment, roePct);
+          const action = decideAdvisoryAction(assessment);
           positions.push({
             tradeId: trade.id,
             symbol: trade.symbol,
@@ -158,52 +160,36 @@ export class CryptoReversalGuard {
             roePct,
             reversalScore: assessment.score,
             level: assessment.level,
-            action: decision.action,
+            action,
             reasons: assessment.reasons,
           });
 
           this.database.addTradeEvent(trade.id, 'REVERSAL_GUARD_CHECK', {
+            policy: 'ADVISORY_ONLY_UNLESS_STRUCTURAL_SL_FAILSAFE',
             mark,
+            stopLoss: trade.stopLoss,
             roePct,
             reversalScore: assessment.score,
             level: assessment.level,
-            action: decision.action,
+            action,
             reasons: assessment.reasons,
             components: assessment.components,
           });
 
-          if (decision.action === 'WARNING') {
-            if (this.shouldWarn(settings.appMode, trade.symbol)) {
-              warnings++;
-              await this.telegram.alert(
-                'REVERSAL GUARD · ADVERTENCIA',
-                `${trade.symbol} ${trade.side} · score ${assessment.score}/100 · ROE ${roePct.toFixed(2)}%\n${assessment.reasons.join(' · ') || 'Deterioro técnico'}`,
-              ).catch(() => undefined);
-            }
-            continue;
+          if (action === 'WARNING' && this.shouldWarn(settings.appMode, trade.symbol)) {
+            warnings++;
+            await this.telegram.alert(
+              assessment.score >= 50 ? 'REVERSAL GUARD · ADVERTENCIA FUERTE' : 'REVERSAL GUARD · ADVERTENCIA',
+              [
+                `${trade.symbol} ${trade.side}`,
+                `Score reversión: ${assessment.score}/100`,
+                `ROE actual: ${roePct.toFixed(2)}%`,
+                `SL estructural R11: ${trade.stopLoss}`,
+                'Acción: observación; NO cierra antes del SL estructural.',
+                assessment.reasons.length ? `Confluencias: ${assessment.reasons.join(' · ')}` : '',
+              ].filter(Boolean).join('\n'),
+            ).catch(() => undefined);
           }
-
-          if (decision.action === 'NONE') continue;
-
-          const block = setCryptoReversalBlock(
-            this.database,
-            settings.appMode,
-            trade.symbol,
-            decision.blockMs,
-            decision.closeReason,
-            assessment.score,
-          );
-          const closed = await this.closeTrade(trade, mark, grossPnl, decision.closeReason, liveMap);
-          if (closed) closeRequested++;
-          await this.notifyCloseDecision(
-            trade,
-            roePct,
-            assessment.score,
-            assessment.reasons,
-            block.blockedUntil,
-            decision.closeReason,
-            closed,
-          );
         } catch (error) {
           const detail = message(error);
           errors.push({ symbol: trade.symbol, error: detail });
@@ -221,6 +207,7 @@ export class CryptoReversalGuard {
         evaluated: positions.length,
         warnings,
         closeRequested,
+        policy: 'ADVISORY_REVERSAL_STRUCTURAL_SL_FAILSAFE',
         blockedSymbols: listCryptoReversalBlocks(this.database, settings.appMode).map((block) => ({
           symbol: block.symbol,
           blockedUntil: block.blockedUntil,
@@ -251,7 +238,7 @@ export class CryptoReversalGuard {
     trade: TradeRecord,
     mark: number,
     grossPnl: number,
-    closeReason: Extract<CloseReason, 'REVERSAL' | 'EMERGENCY_RISK'>,
+    closeReason: Extract<CloseReason, 'EMERGENCY_RISK'>,
     liveMap: Map<string, BinancePosition>,
   ): Promise<boolean> {
     const settings = this.getSettings();
@@ -272,8 +259,9 @@ export class CryptoReversalGuard {
       });
       try { this.database.db.prepare(`DELETE FROM paper_trade_cursor WHERE trade_id=?`).run(trade.id); }
       catch { /* Paper schema may still be initializing during process bootstrap. */ }
-      this.database.addTradeEvent(trade.id, 'REVERSAL_PAPER_CLOSE', {
+      this.database.addTradeEvent(trade.id, 'REVERSAL_PAPER_FAILSAFE_CLOSE', {
         exitPrice: mark,
+        structuralStopLoss: trade.stopLoss,
         grossPnl,
         commission,
         netPnl: grossPnl - commission,
@@ -293,7 +281,7 @@ export class CryptoReversalGuard {
     const live = liveMap.get(trade.symbol.toUpperCase());
     if (!live || Math.abs(live.positionAmt) <= 0) {
       this.repository.patchTrade(trade.id, { state: 'SYNC_REQUIRED', closeReason });
-      this.database.addTradeEvent(trade.id, 'REVERSAL_CLOSE_NO_LIVE_POSITION', { closeReason, mark });
+      this.database.addTradeEvent(trade.id, 'REVERSAL_FAILSAFE_NO_LIVE_POSITION', { closeReason, mark, structuralStopLoss: trade.stopLoss });
       return false;
     }
 
@@ -308,9 +296,10 @@ export class CryptoReversalGuard {
       reduceOnly: true,
       newOrderRespType: 'RESULT',
     });
-    this.database.addTradeEvent(trade.id, 'REVERSAL_CLOSE_REQUESTED', {
+    this.database.addTradeEvent(trade.id, 'REVERSAL_FAILSAFE_CLOSE_REQUESTED', {
       closeReason,
       mark,
+      structuralStopLoss: trade.stopLoss,
       quantity: Math.abs(live.positionAmt),
       side: closeSide,
     });
@@ -320,25 +309,20 @@ export class CryptoReversalGuard {
   private async notifyCloseDecision(
     trade: TradeRecord,
     roePct: number,
-    score: number,
     reasons: string[],
     blockedUntil: number,
-    closeReason: Extract<CloseReason, 'REVERSAL' | 'EMERGENCY_RISK'>,
     closeConfirmedOrRequested: boolean,
   ): Promise<void> {
-    const title = closeConfirmedOrRequested
-      ? closeReason === 'EMERGENCY_RISK' ? 'REVERSAL GUARD · CIERRE EMERGENCIA' : 'REVERSAL GUARD · CIERRE'
-      : 'REVERSAL GUARD · CIERRE NO CONFIRMADO';
     await this.telegram.alert(
-      title,
+      closeConfirmedOrRequested ? 'R11 FAILSAFE · CIERRE DE EMERGENCIA' : 'R11 FAILSAFE · CIERRE NO CONFIRMADO',
       [
         `${trade.symbol} ${trade.side}`,
         `ROE: ${roePct.toFixed(2)}%`,
-        `Score reversión: ${score}/100`,
-        `Motivo: ${closeReason}`,
-        closeConfirmedOrRequested ? 'Cierre PAPER confirmado / orden REAL solicitada.' : 'No se encontró posición live; requiere reconciliación.',
-        `Bloqueado hasta: ${new Date(blockedUntil).toLocaleString('es-MX')}`,
-        reasons.length ? `Confluencias: ${reasons.join(' · ')}` : '',
+        `SL estructural: ${trade.stopLoss}`,
+        'Motivo: la posición seguía abierta después de cruzar el SL R11.',
+        closeConfirmedOrRequested ? 'Cierre PAPER confirmado / orden REAL reduce-only solicitada.' : 'No se encontró posición live; requiere reconciliación.',
+        `Reentrada bloqueada hasta: ${new Date(blockedUntil).toLocaleString('es-MX')}`,
+        reasons.length ? `Detalle: ${reasons.join(' · ')}` : '',
       ].filter(Boolean).join('\n'),
     ).catch(() => undefined);
   }
@@ -361,6 +345,7 @@ export class CryptoReversalGuard {
       evaluated: 0,
       warnings: 0,
       closeRequested: 0,
+      policy: 'ADVISORY_REVERSAL_STRUCTURAL_SL_FAILSAFE',
       blockedSymbols: listCryptoReversalBlocks(this.database, settings.appMode).map((block) => ({
         symbol: block.symbol,
         blockedUntil: block.blockedUntil,
@@ -391,19 +376,18 @@ export class CryptoReversalGuard {
   }
 }
 
-export function decideGuardAction(
+export function decideAdvisoryAction(
   assessment: Pick<CryptoReversalAssessment, 'score'>,
-  roePct: number,
-): {
-  action: 'NONE' | 'WARNING' | 'CLOSE_EMERGENCY' | 'CLOSE_REVERSAL' | 'CLOSE_PREVENTIVE';
-  closeReason: Extract<CloseReason, 'REVERSAL' | 'EMERGENCY_RISK'>;
-  blockMs: number;
-} {
-  if (roePct <= -5) return { action: 'CLOSE_EMERGENCY', closeReason: 'EMERGENCY_RISK', blockMs: FOUR_HOURS };
-  if (assessment.score >= 50) return { action: 'CLOSE_REVERSAL', closeReason: 'REVERSAL', blockMs: FOUR_HOURS };
-  if (assessment.score >= 30 && roePct < -3) return { action: 'CLOSE_PREVENTIVE', closeReason: 'REVERSAL', blockMs: ONE_HOUR };
-  if (assessment.score >= 30) return { action: 'WARNING', closeReason: 'REVERSAL', blockMs: 0 };
-  return { action: 'NONE', closeReason: 'REVERSAL', blockMs: 0 };
+): 'NONE' | 'WARNING' {
+  return assessment.score >= 30 ? 'WARNING' : 'NONE';
+}
+
+export function structuralStopBreached(
+  trade: Pick<TradeRecord, 'side' | 'stopLoss'>,
+  markPrice: number,
+): boolean {
+  if (!(markPrice > 0) || !(trade.stopLoss > 0)) return false;
+  return trade.side === 'BUY' ? markPrice <= trade.stopLoss : markPrice >= trade.stopLoss;
 }
 
 function pricePnl(trade: TradeRecord, mark: number): number {
