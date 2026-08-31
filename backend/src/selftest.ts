@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import type { Candle } from './analysis.js';
+import { assessCryptoReversal } from './cryptoReversal.js';
+import { decideGuardAction } from './cryptoReversalGuard.js';
 import { calibrateR11Async } from './r11Calibration.js';
 import { calculateCryptoSizing } from './risk.js';
 import { selectCryptoOpportunities, selectForexOpportunities } from './selection.js';
@@ -119,7 +122,7 @@ const activeTrade = (broker: 'BINANCE' | 'MT5', symbol: string, fingerprint: str
   assert.deepEqual(selected.map((item) => item.signalFingerprint), ['EUR-RETEST-2']);
 }
 
-// Crypto sizing example requested by product: $100 balance, 1% margin, 20x => $1 margin and $20 notional.
+// Crypto sizing example: $100 balance, 1% margin, 20x => $1 margin and $20 notional.
 {
   const result = calculateCryptoSizing({
     futuresBalance: 100,
@@ -152,6 +155,32 @@ const activeTrade = (broker: 'BINANCE' | 'MT5', symbol: string, fingerprint: str
   assert.equal(result.targetNotional, 10);
 }
 
+// Dynamic Reversal Guard: a clear bearish M5/M15 environment must be strongly
+// adverse to an existing BUY, while the mirror bullish environment must not be.
+{
+  const bearishM5 = syntheticTrend(90, 130, -0.18, 5 * 60_000, true);
+  const bearishM15 = syntheticTrend(230, 180, -0.12, 15 * 60_000, false);
+  const adverse = assessCryptoReversal(bearishM5, bearishM15, 'BUY');
+  assert.ok(adverse.score >= 50, `expected strong BUY reversal score, got ${adverse.score}`);
+  assert.equal(adverse.level, 'STRONG');
+
+  const bullishM5 = syntheticTrend(90, 90, 0.18, 5 * 60_000, false);
+  const bullishM15 = syntheticTrend(230, 90, 0.12, 15 * 60_000, false);
+  const healthy = assessCryptoReversal(bullishM5, bullishM15, 'BUY');
+  assert.ok(healthy.score < 30, `expected healthy BUY score below warning, got ${healthy.score}`);
+}
+
+// Guard action matrix from the production rules.
+{
+  assert.equal(decideGuardAction({ score: 10 }, -5).action, 'CLOSE_EMERGENCY');
+  assert.equal(decideGuardAction({ score: 50 }, 2).action, 'CLOSE_REVERSAL');
+  assert.equal(decideGuardAction({ score: 35 }, -3.1).action, 'CLOSE_PREVENTIVE');
+  assert.equal(decideGuardAction({ score: 35 }, -2).action, 'WARNING');
+  assert.equal(decideGuardAction({ score: 29 }, -4).action, 'NONE');
+  assert.equal(decideGuardAction({ score: 10 }, -5).closeReason, 'EMERGENCY_RISK');
+  assert.equal(decideGuardAction({ score: 50 }, 2).closeReason, 'REVERSAL');
+}
+
 // R11 worker must boot under the same Node/tsx runtime used in Docker. Empty history
 // returns immediately and validates worker loading/message plumbing without doing a full calibration.
 {
@@ -160,4 +189,22 @@ const activeTrade = (broker: 'BINANCE' | 'MT5', symbol: string, fingerprint: str
   assert.equal(model.status, 'INSUFFICIENT_M5_HISTORY');
 }
 
-console.log('V34 R11 selftest: OK');
+console.log('V34 R11 + Dynamic Reversal Guard selftest: OK');
+
+function syntheticTrend(count: number, start: number, step: number, intervalMs: number, spikeLast: boolean): Candle[] {
+  const baseTime = now - count * intervalMs;
+  return Array.from({ length: count }, (_, i) => {
+    const close = Math.max(0.01, start + step * i);
+    const previous = Math.max(0.01, start + step * Math.max(0, i - 1));
+    const open = i === 0 ? previous : Math.max(0.01, start + step * (i - 0.35));
+    const spread = Math.max(0.02, Math.abs(step) * 0.8);
+    return {
+      time: baseTime + i * intervalMs,
+      open,
+      high: Math.max(open, close) + spread,
+      low: Math.max(0.001, Math.min(open, close) - spread),
+      close,
+      volume: spikeLast && i === count - 1 ? 3000 : 1000 + (i % 5) * 10,
+    };
+  });
+}
