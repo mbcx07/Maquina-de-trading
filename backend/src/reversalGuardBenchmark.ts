@@ -4,7 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Candle } from './analysis.js';
 import { assessCryptoReversal } from './cryptoReversal.js';
-import { decideGuardAction } from './cryptoReversalGuard.js';
 import { calibrateR11, evaluateConfigExternalR11, type R11Trade } from './highWinrateR11.js';
 
 const BASE = 'https://data.binance.vision/data/futures/um/daily/klines';
@@ -13,15 +12,7 @@ const SYMBOLS = ['XRPUSDT', 'LINKUSDT', 'UNIUSDT', 'AAVEUSDT', 'ARBUSDT'];
 const CALIBRATION_DAYS = 21;
 const EXTERNAL_DAYS = 7;
 const ROUND_TRIP_COST_PCT = 0.12;
-const LEVERAGE = 20;
 const ENTRY_VETO_THRESHOLDS = [30, 40, 50, 60, 70, 80];
-
-type GuardExitReason = R11Trade['reason'] | 'GUARD_EMERGENCY' | 'GUARD_REVERSAL' | 'GUARD_PREVENTIVE';
-interface GuardedTrade extends R11Trade {
-  guardReason: GuardExitReason;
-  guardScore?: number;
-  guardRoePct?: number;
-}
 
 function utcDay(ms: number): string { return new Date(ms).toISOString().slice(0, 10); }
 function normalizeEpoch(value: number): number {
@@ -46,7 +37,11 @@ async function fetchDailyZip(symbol: string, interval: '5m'|'15m', day: string, 
     const rawTime = Number(cols[0]);
     if (!Number.isFinite(rawTime)) continue;
     const time = normalizeEpoch(rawTime);
-    const open = Number(cols[1]), high = Number(cols[2]), low = Number(cols[3]), close = Number(cols[4]), volume = Number(cols[5] ?? 0);
+    const open = Number(cols[1]);
+    const high = Number(cols[2]);
+    const low = Number(cols[3]);
+    const close = Number(cols[4]);
+    const volume = Number(cols[5] ?? 0);
     if (![time, open, high, low, close].every(Number.isFinite)) continue;
     rows.push({ time, open, high, low, close, volume: Number.isFinite(volume) ? volume : 0 });
   }
@@ -63,47 +58,6 @@ async function fetchVisionRange(symbol: string, interval: '5m'|'15m', startTime:
   return [...map.values()].sort((a, b) => a.time - b.time);
 }
 
-function applyLegacyGuard(trade: R11Trade, m5: Candle[], m15: Candle[]): GuardedTrade {
-  const side = trade.direction > 0 ? 'BUY' as const : 'SELL' as const;
-  const emergencyMove = 0.05 / LEVERAGE;
-  const emergencyPrice = trade.direction > 0
-    ? trade.entry * (1 - emergencyMove)
-    : trade.entry * (1 + emergencyMove);
-
-  for (const candle of m5) {
-    if (candle.time < trade.fillTime || candle.time >= trade.exitTime) continue;
-    const emergencyTouched = trade.direction > 0 ? candle.low <= emergencyPrice : candle.high >= emergencyPrice;
-    if (emergencyTouched) {
-      return {
-        ...trade,
-        exitTime: candle.time,
-        exit: emergencyPrice,
-        resultR: directionalR(trade, emergencyPrice),
-        reason: 'TIMEOUT',
-        guardReason: 'GUARD_EMERGENCY',
-        guardRoePct: -5,
-      };
-    }
-    const assessment = assessmentAt(candle.time, trade, m5, m15);
-    if (!assessment) continue;
-    const roePct = directionalPriceReturnPct(trade.direction, trade.entry, candle.close) * LEVERAGE;
-    const decision = decideGuardAction({ score: assessment.score }, roePct);
-    if (decision.action === 'CLOSE_REVERSAL' || decision.action === 'CLOSE_PREVENTIVE' || decision.action === 'CLOSE_EMERGENCY') {
-      return {
-        ...trade,
-        exitTime: candle.time,
-        exit: candle.close,
-        resultR: directionalR(trade, candle.close),
-        reason: 'TIMEOUT',
-        guardReason: decision.action === 'CLOSE_PREVENTIVE' ? 'GUARD_PREVENTIVE' : decision.action === 'CLOSE_EMERGENCY' ? 'GUARD_EMERGENCY' : 'GUARD_REVERSAL',
-        guardScore: assessment.score,
-        guardRoePct: roePct,
-      };
-    }
-  }
-  return { ...trade, guardReason: trade.reason };
-}
-
 function assessmentAt(time: number, trade: R11Trade, m5: Candle[], m15: Candle[]) {
   const m5Window = m5.filter((row) => row.time <= time).slice(-100);
   const m15Window = m15.filter((row) => row.time <= time).slice(-220);
@@ -112,7 +66,10 @@ function assessmentAt(time: number, trade: R11Trade, m5: Candle[], m15: Candle[]
 }
 
 function entryVetoMetrics(baseTrades: R11Trade[], m5: Candle[], m15: Candle[]) {
-  const scored = baseTrades.map((trade) => ({ trade, score: assessmentAt(trade.fillTime, trade, m5, m15)?.score ?? 0 }));
+  const scored = baseTrades.map((trade) => ({
+    trade,
+    score: assessmentAt(trade.fillTime, trade, m5, m15)?.score ?? 0,
+  }));
   return Object.fromEntries(ENTRY_VETO_THRESHOLDS.map((threshold) => {
     const kept = scored.filter((row) => row.score < threshold).map((row) => row.trade);
     const blocked = scored.filter((row) => row.score >= threshold);
@@ -126,12 +83,6 @@ function entryVetoMetrics(baseTrades: R11Trade[], m5: Candle[], m15: Candle[]) {
   }));
 }
 
-function directionalR(trade: R11Trade, exit: number): number {
-  const risk = Math.abs(trade.entry - trade.sl);
-  if (!(risk > 0)) return 0;
-  return trade.direction > 0 ? (exit - trade.entry) / risk : (trade.entry - exit) / risk;
-}
-
 function directionalPriceReturnPct(direction: 1|-1, entry: number, exit: number): number {
   const raw = (exit - entry) / entry * 100;
   return direction > 0 ? raw : -raw;
@@ -141,9 +92,15 @@ function netTradePct(trade: R11Trade): number {
   return directionalPriceReturnPct(trade.direction, trade.entry, trade.exit) - ROUND_TRIP_COST_PCT;
 }
 
-function metrics(trades: Array<R11Trade | GuardedTrade>) {
-  let wins = 0, losses = 0, grossProfitPct = 0, grossLossPct = 0, netSumPct = 0;
-  let equity = 100, peak = 100, maxDrawdownPct = 0;
+function metrics(trades: R11Trade[]) {
+  let wins = 0;
+  let losses = 0;
+  let grossProfitPct = 0;
+  let grossLossPct = 0;
+  let netSumPct = 0;
+  let equity = 100;
+  let peak = 100;
+  let maxDrawdownPct = 0;
   for (const trade of trades) {
     const netPct = netTradePct(trade);
     netSumPct += netPct;
@@ -173,7 +130,7 @@ async function main() {
   const calibrationEnd = externalStart - 1;
   const calibrationStart = calibrationEnd - CALIBRATION_DAYS * DAY;
   const warmupStart = calibrationStart - 220 * 15 * 60_000;
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'r11-guard-bench-'));
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'r11-reversal-veto-bench-'));
   const rows: any[] = [];
 
   for (const symbol of SYMBOLS) {
@@ -187,53 +144,48 @@ async function main() {
     if (!model.ready) {
       const row = { symbol, modelReady: false, status: model.status };
       rows.push(row);
-      console.log('R11_GUARD_BENCH', JSON.stringify(row));
+      console.log('R11_REVERSAL_VETO', JSON.stringify(row));
       continue;
     }
 
     const baseTrades = evaluateConfigExternalR11(m5, m15, model.config, externalStart, externalEnd).trades;
-    const guardedTrades = baseTrades.map((trade) => applyLegacyGuard(trade, m5, m15));
-    const base = metrics(baseTrades);
-    const guarded = metrics(guardedTrades);
-    const guardCounts = guardedTrades.reduce<Record<string, number>>((acc, trade) => {
-      acc[trade.guardReason] = (acc[trade.guardReason] ?? 0) + 1;
-      return acc;
-    }, {});
     const row = {
       symbol,
       modelReady: true,
       modelStatus: model.status,
       config: model.config,
-      base: roundMetrics(base),
-      legacyGuard: roundMetrics(guarded),
-      legacyDeltaNetPct: Number((guarded.netReturnPct - base.netReturnPct).toFixed(3)),
-      legacyDeltaWinRate: Number((guarded.winRate - base.winRate).toFixed(2)),
-      legacyGuardCounts: guardCounts,
+      base: roundMetrics(metrics(baseTrades)),
       entryVeto: entryVetoMetrics(baseTrades, m5, m15),
     };
     rows.push(row);
-    console.log('R11_GUARD_BENCH', JSON.stringify(row));
+    console.log('R11_REVERSAL_VETO', JSON.stringify(row));
   }
 
   const comparable = rows.filter((row) => row.modelReady && row.base?.trades > 0);
   const vetoSummary = Object.fromEntries(ENTRY_VETO_THRESHOLDS.map((threshold) => {
-    let kept = 0, blocked = 0, blockedWins = 0, blockedLosses = 0;
-    const allKeptTrades: Array<{ winRate: number; netReturnPct: number; expectancyPct: number }> = [];
+    let kept = 0;
+    let blocked = 0;
+    let blockedWins = 0;
+    let blockedLosses = 0;
+    let improvedSymbols = 0;
+    let worsenedSymbols = 0;
     for (const row of comparable) {
       const v = row.entryVeto[String(threshold)];
-      kept += v.kept; blocked += v.blocked; blockedWins += v.blockedWins; blockedLosses += v.blockedLosses;
-      allKeptTrades.push(v.metrics);
+      kept += v.kept;
+      blocked += v.blocked;
+      blockedWins += v.blockedWins;
+      blockedLosses += v.blockedLosses;
+      const delta = Number(v.metrics.netReturnPct) - Number(row.base.netReturnPct);
+      if (delta > 0.0001) improvedSymbols++;
+      else if (delta < -0.0001) worsenedSymbols++;
     }
-    return [String(threshold), { kept, blocked, blockedWins, blockedLosses, perSymbolMetrics: allKeptTrades }];
+    return [String(threshold), { kept, blocked, blockedWins, blockedLosses, improvedSymbols, worsenedSymbols }];
   }));
-  const summary = {
+  console.log('R11_REVERSAL_VETO_SUMMARY', JSON.stringify({
     symbols: rows.length,
     comparable: comparable.length,
-    legacyGuardImprovedNet: comparable.filter((row) => row.legacyDeltaNetPct > 0).map((row) => row.symbol),
-    legacyGuardWorsenedNet: comparable.filter((row) => row.legacyDeltaNetPct < 0).map((row) => row.symbol),
     vetoSummary,
-  };
-  console.log('R11_GUARD_BENCH_SUMMARY', JSON.stringify(summary));
+  }));
 }
 
 function roundMetrics(value: ReturnType<typeof metrics>) {
@@ -250,6 +202,6 @@ function roundMetrics(value: ReturnType<typeof metrics>) {
 }
 
 main().catch((error) => {
-  console.error('R11_GUARD_BENCH_ERROR', error instanceof Error ? error.message : String(error));
+  console.error('R11_REVERSAL_VETO_ERROR', error instanceof Error ? error.message : String(error));
   process.exit(1);
 });
