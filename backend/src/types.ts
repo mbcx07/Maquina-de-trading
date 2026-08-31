@@ -14,6 +14,8 @@ export type TradeState =
 export type CloseReason =
   | 'TP'
   | 'SL'
+  | 'REVERSAL'
+  | 'EMERGENCY_RISK'
   | 'MANUAL'
   | 'LIQUIDATION'
   | 'EXTERNAL'
