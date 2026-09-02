@@ -1,17 +1,28 @@
-QUANTUM COMMODITIES R12 LINUX
-Release: 2026.09.02-R12
+QUANTUM HYBRID R13 LINUX
+Release: 2026.09.02-R13
 Branch: feature/v34-dual-market-engine
 
-Markets: ONLY XAUUSD and CRUDE OIL.
-- XAUUSD is executed as XAUUSDT on Binance USD-M Futures. Directions: BUY and SELL.
-- CRUDE OIL is executed as CLUSDT on Aster Perpetuals. Direction: BUY ONLY. SELL is hard-disabled in strategy and execution code.
+Runtime: Crypto R11 + XAUUSD + CRUDE OIL. Legacy Twelve Data Forex scanner is OFF.
 
-Strategy: dedicated spread-aware scalper. Context is 1-minute EMA9/EMA21 + RSI14 + ATR14. Trigger is synthetic 30-second microstructure built from aggregated trades, including taker buy/sell imbalance, pullback and displacement/break confirmation. M1 is context; 30s is entry timing.
+CRYPTO R13 latency fixes:
+- Crypto keeps R11 M5/M15 calibrated sweep/reclaim/MSS + retest logic.
+- Legacy persisted maxConcurrentCryptoTrades=1 is migrated to 10; user can still change 1-10 from the dashboard.
+- Scanner continues scanning even with open Crypto positions. Open trades only consume their own slots.
+- Qualified symbols are scanned in concurrent chunks of 8 instead of 4.
+- Valid retests are sent to execution immediately after each scan micro-batch; the scanner no longer waits for the complete universe before opening them.
+- Selected Crypto opportunities execute concurrently instead of serial `for/await` execution.
+- SQLite performs final atomic slot/exposure reservation, so concurrent execution cannot exceed the configured max slots, account exposure, or one active position per symbol.
+- Opportunity anti-stale rule: max age 25 seconds. Immediately before reservation the Mark Price is rechecked; if the setup is already past SL/TP or has drifted more than 0.25R from the detected retest, it is rejected instead of chased late.
+- Crypto loop delay reduced to 10 seconds after each completed scan cycle.
+- Universe R11 qualification runs two symbols concurrently with a 350ms inter-batch pause. This exposes partially qualified markets sooner without returning to unsafe unrestricted execution.
 
-Cost gate: every entry uses real bid/ask spread. Estimated round-trip cost = spread + two taker fees + two slippage allowances. Expected gross TP must be at least 2.5x estimated round-trip cost. PAPER fills long entries at ask plus estimated slippage and long exits at bid minus estimated slippage; shorts use the inverse. This prevents micro-TPs whose gross movement is consumed by spread and fees.
+COMMODITIES:
+- XAUUSD executes as XAUUSDT on Binance Futures; BUY and SELL.
+- CRUDE OIL executes as CLUSDT on Aster Perpetuals; BUY ONLY. SELL remains hard-disabled in code.
+- Commodity scalper remains 30s trigger / 1m context and spread/cost aware. PAPER first; commodity REAL remains locked unless COMMODITY_ALLOW_REAL=true.
 
-Risk: strict 1% margin target per trade. Margin is never increased to satisfy minimum notional. Default requested leverage is 10x; XAU TradFi leverage is capped at 10x in R12. One open position per symbol and mode. Default max holding time is 180 seconds.
-
-Safety: APP_MODE defaults to PAPER. REAL commodity execution is additionally locked unless COMMODITY_ALLOW_REAL=true. Aster private credentials are not required for PAPER/public CLUSDT data and must stay only in the user's local .env when REAL is intentionally enabled. Legacy Crypto R11 and Twelve Data Forex scanners are not started by the R12 Linux backend.
-
-UI: dedicated two-column dashboard: XAUUSD left and CRUDE OIL right, real bid/ask/spread, cost estimate, 30s/1m diagnostics, active position, PAPER metrics, recent trades, and Day/Week/Month/Year net performance charts.
+UI R13:
+- Crypto is restored to the main Linux app; the prior R12 interpretation that removed Crypto is corrected.
+- Visible Crypto slots used/free/max, scanner progress, qualified models, opportunities, execution errors, active positions and recent trades.
+- Dashboard can set 1-10 max simultaneous Crypto positions; default/migrated value is 10.
+- XAUUSD and CRUDE OIL remain visible below Crypto. Forex/Twelve Data is removed from the active runtime.
