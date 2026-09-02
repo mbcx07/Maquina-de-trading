@@ -1,5 +1,6 @@
 :root {
   color-scheme: dark;
+  font-size: 17px;
 }
 
 * {
@@ -12,6 +13,17 @@ body,
   min-height: 100%;
 }
 
+html {
+  background: #02050a;
+}
+
+body {
+  font-size: 1rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
 button,
 input,
 select,
@@ -19,31 +31,130 @@ textarea {
   font: inherit;
 }
 
+button {
+  min-height: 2.5rem;
+}
+
+/* R14 readability floor: the original dashboard used many 7–10px labels. */
+[class*="text-[7px]"] {
+  font-size: 0.70rem !important;
+  line-height: 1rem !important;
+}
+
+[class*="text-[8px]"] {
+  font-size: 0.73rem !important;
+  line-height: 1.05rem !important;
+}
+
+[class*="text-[9px]"] {
+  font-size: 0.76rem !important;
+  line-height: 1.1rem !important;
+}
+
+[class*="text-[10px]"] {
+  font-size: 0.80rem !important;
+  line-height: 1.15rem !important;
+}
+
+[class*="text-[11px]"] {
+  font-size: 0.84rem !important;
+  line-height: 1.2rem !important;
+}
+
+.text-xs {
+  font-size: 0.82rem !important;
+  line-height: 1.2rem !important;
+}
+
+.text-sm {
+  font-size: 0.92rem !important;
+  line-height: 1.3rem !important;
+}
+
+/* Higher-contrast neutral hierarchy for dark backgrounds. */
+.text-slate-600 {
+  color: #94a3b8 !important;
+}
+
+.text-slate-500 {
+  color: #b6c3d4 !important;
+}
+
+.text-slate-400 {
+  color: #cbd5e1 !important;
+}
+
+.text-slate-300 {
+  color: #e2e8f0 !important;
+}
+
+[class*="border-slate-800"] {
+  border-color: rgba(71, 85, 105, 0.78) !important;
+}
+
+[class*="border-cyan-950"] {
+  border-color: rgba(14, 116, 144, 0.48) !important;
+}
+
+/* Tables must remain readable at normal browser zoom. */
+table {
+  font-size: 0.80rem !important;
+}
+
+thead {
+  color: #cbd5e1 !important;
+  background: rgba(15, 23, 42, 0.78) !important;
+}
+
+thead th {
+  font-weight: 800 !important;
+}
+
+tbody td {
+  color: #e2e8f0;
+}
+
+/* Chart labels: larger axes/markers plus a dark halo over candles. */
+svg text {
+  font-size: 13px !important;
+  font-weight: 650;
+  paint-order: stroke fill;
+  stroke: rgba(2, 5, 10, 0.88);
+  stroke-width: 1.6px;
+  stroke-linejoin: round;
+}
+
+svg text[fill="#526578"] {
+  fill: #a8b8c9 !important;
+}
+
+/* Keep inputs/forms usable if legacy panels are reintroduced. */
 .field-label {
   display: block;
   margin-bottom: 0.5rem;
-  color: #64748b;
-  font-size: 0.5rem;
+  color: #cbd5e1;
+  font-size: 0.75rem;
   font-weight: 900;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.10em;
   text-transform: uppercase;
 }
 
 .field {
   width: 100%;
-  border: 1px solid #334155;
+  min-height: 2.65rem;
+  border: 1px solid #475569;
   border-radius: 0.75rem;
   background: #05080d;
   color: #f8fafc;
-  padding: 0.7rem 0.8rem;
-  font-size: 0.625rem;
+  padding: 0.75rem 0.85rem;
+  font-size: 0.875rem;
   outline: none;
   transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
 .field:focus {
-  border-color: #6366f1;
-  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.12);
+  border-color: #67e8f9;
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.16);
 }
 
 .field:disabled {
@@ -51,11 +162,21 @@ textarea {
 }
 
 input[type='checkbox'] {
-  width: 1rem;
-  height: 1rem;
-  accent-color: #6366f1;
+  width: 1.1rem;
+  height: 1.1rem;
+  accent-color: #22d3ee;
 }
 
 textarea {
   resize: vertical;
+}
+
+@media (max-width: 900px) {
+  :root {
+    font-size: 16px;
+  }
+
+  svg text {
+    font-size: 14px !important;
+  }
 }
