@@ -108,7 +108,7 @@ export class AsterV3Client {
     const isGet = method === 'GET';
     const response = await fetch(`${this.baseUrl()}${endpoint}${isGet ? `?${body.toString()}` : ''}`, {
       method,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Quantum-Dual-R12/1.0' },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Quantum-Dual-R14/1.0' },
       body: isGet ? undefined : body.toString(),
     });
     const text = await response.text();
@@ -169,8 +169,6 @@ export class AsterV3Client {
 
   async getAggTrades(symbol: string, startTime?: number, endTime?: number): Promise<AsterAggTrade[]> {
     const params: Record<string, string | number | undefined> = { symbol: symbol.toUpperCase(), limit: 1000 };
-    // Aster restricts explicit start/end windows. Passing 0 -> now creates an invalid huge interval,
-    // so zero/omitted means "latest trades". Explicit windows are capped by callers to <1 hour.
     if (startTime !== undefined && startTime > 0) {
       params.startTime = Math.floor(startTime);
       if (endTime !== undefined && endTime >= startTime) params.endTime = Math.floor(endTime);
@@ -219,9 +217,25 @@ export class AsterV3Client {
     })).filter((row) => Math.abs(row.positionAmt) > 0);
   }
 
+  async getMaxAllowedLeverage(symbol = 'CLUSDT'): Promise<number> {
+    if (!this.hasCredentials()) return 20;
+    try {
+      const rows = await this.signedRequest<any[]>('/fapi/v3/leverageBracket', 'GET', { symbol: symbol.toUpperCase() });
+      const brackets = rows?.[0]?.brackets ?? rows?.brackets ?? [];
+      const values = (Array.isArray(brackets) ? brackets : [])
+        .map((row: any) => Number(row.initialLeverage ?? row.leverage ?? 0))
+        .filter((value: number) => Number.isFinite(value) && value > 0);
+      return values.length ? Math.max(...values) : 20;
+    } catch {
+      return 20;
+    }
+  }
+
   async setLeverage(symbol: string, leverage: number): Promise<number> {
-    const row = await this.signedRequest<{ leverage?: number }>('/fapi/v3/leverage', 'POST', { symbol: symbol.toUpperCase(), leverage: Math.max(1, Math.min(20, Math.floor(leverage))) });
-    return Number(row.leverage ?? leverage);
+    const maxAllowed = await this.getMaxAllowedLeverage(symbol);
+    const requested = Math.max(1, Math.min(maxAllowed, Math.floor(leverage)));
+    const row = await this.signedRequest<{ leverage?: number }>('/fapi/v3/leverage', 'POST', { symbol: symbol.toUpperCase(), leverage: requested });
+    return Number(row.leverage ?? requested);
   }
 
   async createMarketOrder(symbol: string, side: TradeSide, quantity: number, reduceOnly = false): Promise<any> {
