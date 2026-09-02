@@ -1,7 +1,7 @@
 {
-  "name": "quantum-dual-commodities-r14",
+  "name": "quantum-dual-commodities-r15",
   "private": true,
-  "version": "14.0.0",
+  "version": "15.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
