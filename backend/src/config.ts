@@ -52,6 +52,7 @@ const envSchema = z.object({
   COMMODITY_TAKER_FEE_PCT_BINANCE: z.coerce.number().min(0).max(1).default(0.05),
   COMMODITY_TAKER_FEE_PCT_ASTER: z.coerce.number().min(0).max(1).default(0.05),
   COMMODITY_SLIPPAGE_PCT: z.coerce.number().min(0).max(1).default(0.01),
+  COMMODITY_ALLOW_REAL: z.string().default('false').transform((value) => value.trim().toLowerCase() === 'true'),
 
   // Legacy R11 Forex desk retained only for backward compatibility; R12 does not start it.
   FOREX_SYMBOLS: z.string().default('EURUSD,GBPUSD,USDJPY,EURJPY,AUDUSD,USDCAD,USDCHF,NZDUSD,GBPJPY,AUDJPY,EURGBP,EURAUD,XAUUSD'),
