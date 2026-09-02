@@ -93,8 +93,10 @@ export function defaultSettings(): EngineSettings {
     paperInitialBalance: env.PAPER_INITIAL_BALANCE,
     paperRoundTripCostPct: env.PAPER_ROUND_TRIP_COST_PCT,
 
+    // The dedicated R14 MT5 commodity engine executes directly through Mt5BridgeClient.
+    // This legacy field remains SIGNAL_ONLY to preserve the existing EngineSettings contract.
     forexEnabled: true,
-    forexExecutionMode: 'AUTO',
+    forexExecutionMode: 'SIGNAL_ONLY',
     forexSymbols: env.FOREX_SYMBOLS.split(',').map((symbol) => symbol.trim()).filter(Boolean),
     forexSignalScanIntervalMinutes: env.FOREX_SIGNAL_SCAN_INTERVAL_MINUTES,
     forexSignalsPerCycle: env.FOREX_SIGNALS_PER_CYCLE,
