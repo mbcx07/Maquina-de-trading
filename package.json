@@ -1,7 +1,7 @@
 {
-  "name": "quantum-commodities-r12",
+  "name": "quantum-hybrid-r13",
   "private": true,
-  "version": "12.0.0",
+  "version": "13.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
