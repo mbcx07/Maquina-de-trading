@@ -114,6 +114,8 @@ def ticks(
     if rows is None:
         raise HTTPException(status_code=503, detail={"error": "MT5_COPY_TICKS_FAILED", "last_error": mt5.last_error()})
     output = []
+    buy_flag = int(getattr(mt5, "TICK_FLAG_BUY", 32))
+    sell_flag = int(getattr(mt5, "TICK_FLAG_SELL", 64))
     for row in rows:
         bid = float(row["bid"])
         ask = float(row["ask"])
@@ -130,6 +132,8 @@ def ticks(
             "price": price,
             "volume": float(row["volume"]),
             "flags": flags,
+            "buy": bool(flags & buy_flag),
+            "sell": bool(flags & sell_flag),
         })
     return output
 
