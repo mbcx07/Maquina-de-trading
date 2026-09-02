@@ -4,6 +4,7 @@ import type { EngineSettings } from './types.js';
 
 const envSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
+  COMMODITY_PORT: z.coerce.number().int().min(1).max(65535).default(8788),
   APP_MODE: z.enum(['PAPER', 'TESTNET', 'REAL']).default('PAPER'),
   DB_PATH: z.string().default('./data/trading-v34.sqlite'),
 
@@ -15,6 +16,13 @@ const envSchema = z.object({
   BINANCE_API_SECRET: z.string().default(''),
   BINANCE_BASE_URL: z.string().url().default('https://fapi.binance.com'),
   BINANCE_TESTNET_BASE_URL: z.string().url().default('https://testnet.binancefuture.com'),
+
+  // Aster Pro API V3. These values stay on the user's Linux host. Never paste them in chat.
+  // `user` is the Aster master wallet address; `signer` + private key belong to the Pro API wallet.
+  ASTER_USER: z.string().default(''),
+  ASTER_SIGNER: z.string().default(''),
+  ASTER_PRIVATE_KEY: z.string().default(''),
+  ASTER_BASE_URL: z.string().url().default('https://fapi3.asterdex.com'),
 
   TELEGRAM_BOT_TOKEN: z.string().default(''),
   TELEGRAM_CHAT_ID: z.string().default(''),
@@ -32,8 +40,20 @@ const envSchema = z.object({
   PAPER_INITIAL_BALANCE: z.coerce.number().positive().default(100),
   PAPER_ROUND_TRIP_COST_PCT: z.coerce.number().min(0).max(10).default(0.12),
 
-  // R11 Forex desk: currencies + XAUUSD only. A pending retest survives 3x M5 bars,
-  // so the default polling interval must not be slower than the signal lifecycle.
+  // Dedicated R12 commodities scalper. Margin is 1% of venue balance per trade.
+  COMMODITY_MARGIN_PCT: z.coerce.number().positive().max(10).default(1),
+  COMMODITY_REQUESTED_LEVERAGE: z.coerce.number().int().min(1).max(20).default(10),
+  COMMODITY_LOOP_MS: z.coerce.number().int().min(1000).max(60_000).default(5000),
+  COMMODITY_REFRESH_MS: z.coerce.number().int().min(10_000).max(120_000).default(30_000),
+  COMMODITY_MAX_HOLD_SECONDS: z.coerce.number().int().min(30).max(900).default(180),
+  COMMODITY_MIN_EDGE_MULTIPLE: z.coerce.number().min(1).max(10).default(2.5),
+  COMMODITY_MAX_SPREAD_PCT_XAU: z.coerce.number().positive().max(2).default(0.05),
+  COMMODITY_MAX_SPREAD_PCT_CL: z.coerce.number().positive().max(2).default(0.08),
+  COMMODITY_TAKER_FEE_PCT_BINANCE: z.coerce.number().min(0).max(1).default(0.05),
+  COMMODITY_TAKER_FEE_PCT_ASTER: z.coerce.number().min(0).max(1).default(0.05),
+  COMMODITY_SLIPPAGE_PCT: z.coerce.number().min(0).max(1).default(0.01),
+
+  // Legacy R11 Forex desk retained only for backward compatibility; R12 does not start it.
   FOREX_SYMBOLS: z.string().default('EURUSD,GBPUSD,USDJPY,EURJPY,AUDUSD,USDCAD,USDCHF,NZDUSD,GBPJPY,AUDJPY,EURGBP,EURAUD,XAUUSD'),
   FOREX_SIGNAL_SCAN_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).default(5),
   FOREX_SIGNALS_PER_CYCLE: z.coerce.number().int().min(1).max(20).default(6),
