@@ -38,18 +38,22 @@ const envSchema = z.object({
   PAPER_INITIAL_BALANCE: z.coerce.number().positive().default(100),
   PAPER_ROUND_TRIP_COST_PCT: z.coerce.number().min(0).max(10).default(0.12),
 
-  // R14 dual commodities engine. Exchange side uses max permitted leverage; MT5 uses broker leverage/sizing.
+  // R15 dual commodities engine.
+  COMMODITY_PAPER_INITIAL_BALANCE: z.coerce.number().positive().default(50),
   COMMODITY_MARGIN_PCT: z.coerce.number().positive().max(10).default(1),
   COMMODITY_REQUESTED_LEVERAGE: z.coerce.number().int().min(1).max(125).default(125),
-  COMMODITY_LOOP_MS: z.coerce.number().int().min(1000).max(60_000).default(5000),
-  COMMODITY_REFRESH_MS: z.coerce.number().int().min(10_000).max(120_000).default(30_000),
+  COMMODITY_LOOP_MS: z.coerce.number().int().min(500).max(60_000).default(1000),
+  COMMODITY_MARKET_REFRESH_MS: z.coerce.number().int().min(500).max(30_000).default(2000),
+  COMMODITY_STREAM_MS: z.coerce.number().int().min(250).max(5000).default(500),
   COMMODITY_MAX_HOLD_SECONDS: z.coerce.number().int().min(30).max(900).default(180),
-  COMMODITY_MIN_EDGE_MULTIPLE: z.coerce.number().min(1).max(10).default(2.5),
+  COMMODITY_SIGNAL_SCORE_MIN: z.coerce.number().min(35).max(90).default(58),
+  COMMODITY_MIN_EDGE_MULTIPLE: z.coerce.number().min(1).max(10).default(2.2),
   COMMODITY_MAX_SPREAD_PCT_XAU: z.coerce.number().positive().max(2).default(0.05),
   COMMODITY_MAX_SPREAD_PCT_CL: z.coerce.number().positive().max(2).default(0.08),
   COMMODITY_TAKER_FEE_PCT_BINANCE: z.coerce.number().min(0).max(1).default(0.05),
   COMMODITY_TAKER_FEE_PCT_ASTER: z.coerce.number().min(0).max(1).default(0.05),
   COMMODITY_SLIPPAGE_PCT: z.coerce.number().min(0).max(1).default(0.01),
+  COMMODITY_BACKTEST_MAX_DAYS: z.coerce.number().int().min(7).max(730).default(365),
   COMMODITY_ALLOW_REAL: z.string().default('false').transform((value) => value.trim().toLowerCase() === 'true'),
 
   // MT5 comparison leg. Spread is always read live from the broker.
@@ -93,8 +97,6 @@ export function defaultSettings(): EngineSettings {
     paperInitialBalance: env.PAPER_INITIAL_BALANCE,
     paperRoundTripCostPct: env.PAPER_ROUND_TRIP_COST_PCT,
 
-    // The dedicated R14 MT5 commodity engine executes directly through Mt5BridgeClient.
-    // This legacy field remains SIGNAL_ONLY to preserve the existing EngineSettings contract.
     forexEnabled: true,
     forexExecutionMode: 'SIGNAL_ONLY',
     forexSymbols: env.FOREX_SYMBOLS.split(',').map((symbol) => symbol.trim()).filter(Boolean),
@@ -107,7 +109,7 @@ export function defaultSettings(): EngineSettings {
     forexMaxEntriesPerSymbol: 1,
     forexRiskMode: 'MARGIN_PERCENT',
     forexPctPerTrade: 1,
-    forexMagicNumber: 340014,
+    forexMagicNumber: 340015,
     forexMaxDeviationPoints: 20,
     forexMaxSpreadPoints: 0,
   };
