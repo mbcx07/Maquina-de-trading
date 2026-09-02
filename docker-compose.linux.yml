@@ -66,7 +66,7 @@ services:
     ports:
       - "127.0.0.1:8080:80"
     volumes:
-      - /run/quantum-updater.sock:/run/quantum-updater.sock
+      - /run/quantum-updater:/run/quantum-updater
 
 volumes:
   v34_data:
