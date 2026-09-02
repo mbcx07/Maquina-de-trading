@@ -9,6 +9,8 @@ const AUDIT_MODEL = 'R11_CALIBRATED_SWEEP_RETEST_M5_M15_EXTERNAL_V1';
 const CALIBRATION_DAYS = 21;
 const EXTERNAL_DAYS = 7;
 const ROUND_TRIP_COST_PCT = 0.12;
+const AUDIT_CONCURRENCY = 2;
+const AUDIT_BATCH_PAUSE_MS = 350;
 
 export interface ExternalMetricsR11 {
   trades: number;
@@ -118,6 +120,7 @@ export class UniverseQualificationService {
       entry: 'M5_PENDING_RETEST',
       bias: 'M5_M15_ALIGNED',
       noM1SignalLogic: true,
+      auditConcurrency: AUDIT_CONCURRENCY,
     };
 
     try {
@@ -135,52 +138,31 @@ export class UniverseQualificationService {
         qualifiedSymbols: [], results: [], errors: [], rules,
       });
 
-      for (let i = 0; i < symbols.length; i++) {
-        const symbol = symbols[i];
-        try {
-          const { ltf, htf } = await this.market.getDualHistoricalRange(symbol, calibrationStart, endTime);
-          const calibrationM5 = ltf.filter((candle) => candle.time >= calibrationStart && candle.time <= calibrationEnd);
-          const calibrationM15 = htf.filter((candle) => candle.time <= calibrationEnd);
-          if (calibrationM5.length < 3000 || calibrationM15.length < 500) {
-            throw new Error(`R11_INSUFFICIENT_HISTORY:m5=${calibrationM5.length}:m15=${calibrationM15.length}`);
-          }
+      let completed = 0;
+      for (let i = 0; i < symbols.length; i += AUDIT_CONCURRENCY) {
+        const batch = symbols.slice(i, i + AUDIT_CONCURRENCY);
+        const settled = await Promise.allSettled(batch.map((symbol) =>
+          this.evaluateSymbol(symbol, calibrationStart, calibrationEnd, externalStart, endTime),
+        ));
 
-          const model = await calibrateR11Async(calibrationM5, calibrationM15);
-          let external = emptyExternalMetrics();
-          if (model.ready) {
-            const test = evaluateConfigExternalR11(ltf, htf, model.config, externalStart, endTime);
-            external = externalMetrics(test.trades, ROUND_TRIP_COST_PCT);
-          }
-          const reasons = qualificationReasons(model, external);
-          results.push({
-            symbol,
-            qualified: reasons.length === 0,
-            reasons,
-            modelStatus: model.status,
-            fallback: model.fallback,
-            model: model.ready ? {
-              config: model.config,
-              score: model.score,
-              calibratedAt: Date.now(),
-              train: model.train,
-              validation: model.validation,
-              holdout: model.holdout,
-            } : undefined,
-            external,
-          });
-        } catch (error) {
-          errors.push({ symbol, error: error instanceof Error ? error.message : String(error) });
-        }
+        settled.forEach((item, index) => {
+          const symbol = batch[index];
+          completed++;
+          if (item.status === 'fulfilled') results.push(item.value);
+          else errors.push({ symbol, error: item.reason instanceof Error ? item.reason.message : String(item.reason) });
+        });
 
         const compact = sortResults(results);
         this.save({
-          status: 'RUNNING', startedAt, total: symbols.length, completed: i + 1,
-          current: symbol,
+          status: 'RUNNING', startedAt, total: symbols.length, completed,
+          current: batch.join(','),
           qualifiedSymbols: compact.filter((row) => row.qualified).map((row) => row.symbol),
           results: compact,
           errors: errors.slice(-100),
           rules,
         });
+
+        if (i + AUDIT_CONCURRENCY < symbols.length) await sleep(AUDIT_BATCH_PAUSE_MS);
       }
 
       const compact = sortResults(results);
@@ -209,6 +191,45 @@ export class UniverseQualificationService {
     } finally {
       this.running = false;
     }
+  }
+
+  private async evaluateSymbol(
+    symbol: string,
+    calibrationStart: number,
+    calibrationEnd: number,
+    externalStart: number,
+    endTime: number,
+  ): Promise<QualifiedModelResult> {
+    const { ltf, htf } = await this.market.getDualHistoricalRange(symbol, calibrationStart, endTime);
+    const calibrationM5 = ltf.filter((candle) => candle.time >= calibrationStart && candle.time <= calibrationEnd);
+    const calibrationM15 = htf.filter((candle) => candle.time <= calibrationEnd);
+    if (calibrationM5.length < 3000 || calibrationM15.length < 500) {
+      throw new Error(`R11_INSUFFICIENT_HISTORY:m5=${calibrationM5.length}:m15=${calibrationM15.length}`);
+    }
+
+    const model = await calibrateR11Async(calibrationM5, calibrationM15);
+    let external = emptyExternalMetrics();
+    if (model.ready) {
+      const test = evaluateConfigExternalR11(ltf, htf, model.config, externalStart, endTime);
+      external = externalMetrics(test.trades, ROUND_TRIP_COST_PCT);
+    }
+    const reasons = qualificationReasons(model, external);
+    return {
+      symbol,
+      qualified: reasons.length === 0,
+      reasons,
+      modelStatus: model.status,
+      fallback: model.fallback,
+      model: model.ready ? {
+        config: model.config,
+        score: model.score,
+        calibratedAt: Date.now(),
+        train: model.train,
+        validation: model.validation,
+        holdout: model.holdout,
+      } : undefined,
+      external,
+    };
   }
 
   private save(state: UniverseAuditState): void {
@@ -277,4 +298,8 @@ function sortResults(results: QualifiedModelResult[]): QualifiedModelResult[] {
     b.external.winRate - a.external.winRate ||
     b.external.netReturnPct - a.external.netReturnPct,
   );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
