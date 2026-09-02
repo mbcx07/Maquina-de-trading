@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Literal, Optional
 
 import MetaTrader5 as mt5
 from dotenv import load_dotenv
 from fastapi import APIRouter, Header, HTTPException
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -21,6 +22,14 @@ TIMEFRAMES = {
     "M15": mt5.TIMEFRAME_M15,
     "H1": mt5.TIMEFRAME_H1,
 }
+
+
+class ProfitRequest(BaseModel):
+    symbol: str = Field(min_length=1)
+    side: Literal["BUY", "SELL"]
+    volume: float = Field(gt=0)
+    entry: float = Field(gt=0)
+    exit: float = Field(gt=0)
 
 
 def authorize(x_bridge_token: Optional[str]) -> None:
@@ -86,6 +95,55 @@ def snapshot(symbol: str, x_bridge_token: Optional[str] = Header(default=None)):
         "spreadPrice": max(0.0, ask - bid),
         "timeMsc": int(getattr(tick, "time_msc", 0)),
     }
+
+
+@router.get("/ticks/{symbol}")
+def ticks(
+    symbol: str,
+    seconds: int = 300,
+    limit: int = 5000,
+    x_bridge_token: Optional[str] = Header(default=None),
+):
+    authorize(x_bridge_token)
+    ensure_mt5()
+    normalized = ensure_symbol(symbol)
+    seconds = max(30, min(int(seconds), 1800))
+    limit = max(50, min(int(limit), 20000))
+    start = datetime.now(tz=timezone.utc) - timedelta(seconds=seconds)
+    rows = mt5.copy_ticks_from(normalized, start, limit, mt5.COPY_TICKS_ALL)
+    if rows is None:
+        raise HTTPException(status_code=503, detail={"error": "MT5_COPY_TICKS_FAILED", "last_error": mt5.last_error()})
+    output = []
+    for row in rows:
+        bid = float(row["bid"])
+        ask = float(row["ask"])
+        last = float(row["last"])
+        price = last if last > 0 else (bid + ask) / 2 if bid > 0 and ask > 0 else max(bid, ask)
+        if price <= 0:
+            continue
+        flags = int(row["flags"])
+        output.append({
+            "timeMsc": int(row["time_msc"]),
+            "bid": bid,
+            "ask": ask,
+            "last": last,
+            "price": price,
+            "volume": float(row["volume"]),
+            "flags": flags,
+        })
+    return output
+
+
+@router.post("/calc-profit")
+def calc_profit(req: ProfitRequest, x_bridge_token: Optional[str] = Header(default=None)):
+    authorize(x_bridge_token)
+    ensure_mt5()
+    symbol = ensure_symbol(req.symbol)
+    order_type = mt5.ORDER_TYPE_BUY if req.side == "BUY" else mt5.ORDER_TYPE_SELL
+    result = mt5.order_calc_profit(order_type, symbol, float(req.volume), float(req.entry), float(req.exit))
+    if result is None:
+        raise HTTPException(status_code=422, detail={"error": "MT5_ORDER_CALC_PROFIT_FAILED", "last_error": mt5.last_error()})
+    return {"symbol": symbol, "side": req.side, "volume": req.volume, "entry": req.entry, "exit": req.exit, "profit": float(result)}
 
 
 @router.get("/rates/{symbol}")
