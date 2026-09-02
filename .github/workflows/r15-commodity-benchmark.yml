@@ -8,12 +8,13 @@ on:
     paths:
       - 'backend/src/commodityStrategyR15.ts'
       - 'backend/src/r15CommodityBenchmark.ts'
+      - 'backend/src/r15XauOptimizer.ts'
       - '.github/workflows/r15-commodity-benchmark.yml'
 
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: backend
@@ -24,3 +25,4 @@ jobs:
           node-version: 22
       - run: npm install
       - run: npx tsx src/r15CommodityBenchmark.ts
+      - run: npx tsx src/r15XauOptimizer.ts
