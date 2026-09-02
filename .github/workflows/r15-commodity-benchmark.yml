@@ -25,6 +25,4 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - run: npx tsx src/r15CommodityBenchmark.ts
-      - run: npx tsx src/r15XauOptimizer.ts
       - run: npx tsx src/r15XauStrategyLab.ts
