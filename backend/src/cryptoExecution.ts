@@ -11,9 +11,13 @@ import { TelegramService } from './telegram.js';
 import type { EngineSettings, Opportunity, TradeRecord, TradeSide } from './types.js';
 
 const R11_EXIT_MODEL = 'R11_PENDING_RETEST_STRUCTURAL';
+const MAX_OPPORTUNITY_AGE_MS = 25_000;
+const MAX_RETEST_DRIFT_R = 0.25;
 
 export class CryptoExecutionService {
   private readonly reversalGuard: CryptoReversalGuard;
+  private oneWayVerifiedAt = 0;
+  private oneWayVerification: Promise<void> | null = null;
 
   constructor(
     private readonly database: TradingDatabase,
@@ -22,9 +26,6 @@ export class CryptoExecutionService {
     private readonly telegram: TelegramService,
     private readonly getSettings: () => EngineSettings,
   ) {
-    // The guard is tied to the singleton executor lifecycle. It keeps protecting
-    // already-open positions even when engineEnabled=false, without changing the
-    // proven Linux runtime bootstrap.
     this.reversalGuard = new CryptoReversalGuard(
       database,
       repository,
@@ -50,9 +51,8 @@ export class CryptoExecutionService {
     if (opportunity.rollingWinRate < settings.cryptoMinRollingWinRate) throw new Error('CRYPTO_WINRATE_FILTER');
 
     this.repository.saveSignal(opportunity);
+    await this.assertOpportunityStillFresh(opportunity);
 
-    // Second-line defense: a symbol may become blocked after scanner selection but
-    // before the order is actually placed. Never let that race reopen a reversal.
     const reversalBlock = getCryptoReversalBlock(this.database, settings.appMode, opportunity.symbol);
     if (reversalBlock) {
       const reason = `CRYPTO_REVERSAL_BLOCKED_UNTIL_${reversalBlock.blockedUntil}`;
@@ -73,7 +73,7 @@ export class CryptoExecutionService {
     }
 
     if (settings.appMode !== 'PAPER') {
-      await this.assertOneWayMode();
+      await this.assertOneWayModeCached();
       await this.binance.assertSymbolNotOpen(opportunity.symbol);
     }
 
@@ -88,8 +88,6 @@ export class CryptoExecutionService {
       ? settings.cryptoRequestedLeverage
       : await this.binance.getMaxAllowedLeverage(opportunity.symbol);
 
-    // R11 stop is structural invalidation around the calibrated retest. Leverage
-    // changes notional/margin PnL only; it never rewrites the trigger price.
     const sizing = calculateCryptoSizing({
       futuresBalance,
       marginPctPerTrade: settings.cryptoMarginPctPerTrade,
@@ -119,6 +117,11 @@ export class CryptoExecutionService {
         `CRYPTO_ACCOUNT_EXPOSURE_LIMIT: allocated=${activeAllocatedMargin.toFixed(4)} new=${marginRequired.toFixed(4)} max=${maxAllocatedMargin.toFixed(4)}`,
       );
     }
+
+    // Re-check immediately before reserving a slot. This deliberately happens after
+    // sizing/network calls so a retest that ran away while the order was being prepared
+    // is discarded instead of chased late.
+    await this.assertOpportunityStillFresh(opportunity);
 
     const id = `BN-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     const now = Date.now();
@@ -155,6 +158,9 @@ export class CryptoExecutionService {
         executionMode: settings.appMode,
         risk: sizing,
         exitModel: R11_EXIT_MODEL,
+        opportunityAgeMsAtReservation: Date.now() - opportunity.createdAt,
+        maxOpportunityAgeMs: MAX_OPPORTUNITY_AGE_MS,
+        maxRetestDriftR: MAX_RETEST_DRIFT_R,
         reversalScoreAtEntry: opportunity.metadata?.reversalScoreAtEntry,
         reversalLevelAtEntry: opportunity.metadata?.reversalLevelAtEntry,
         exitDisplayAtSignal: exitDisplay(opportunity.side, opportunity.entry, opportunity.stopLoss, opportunity.takeProfit, sizing.effectiveLeverage),
@@ -166,7 +172,19 @@ export class CryptoExecutionService {
       },
     };
 
-    this.repository.createTradeAtomically(reserved);
+    let reservedLocally = false;
+    try {
+      const reservation = this.repository.reserveCryptoTradeAtomically(
+        reserved,
+        Math.min(10, settings.maxConcurrentCryptoTrades),
+        maxAllocatedMargin,
+      );
+      reservedLocally = true;
+      this.database.addTradeEvent(id, 'CONCURRENT_SLOT_CONFIRMED', reservation);
+    } catch (error) {
+      this.repository.rejectOpportunity(opportunity.id, error instanceof Error ? error.message : String(error));
+      throw error;
+    }
 
     let entryPlaced = false;
     try {
@@ -180,8 +198,6 @@ export class CryptoExecutionService {
       const orderId = String(order.orderId ?? order.clientOrderId ?? order.paper ?? `ORDER-${Date.now()}`);
       const fillPrice = Number(order.avgPrice || order.price || opportunity.entry) || opportunity.entry;
 
-      // Preserve the R11 structural levels produced at the retest. The display uses
-      // the actual fill only to report truthful distance/ROE after slippage.
       this.repository.patchTrade(id, {
         brokerOrderId: orderId,
         leverage,
@@ -267,22 +283,65 @@ export class CryptoExecutionService {
 
       return opened;
     } catch (error) {
-      const current = this.database.getActiveTrades('BINANCE').find((trade) => trade.id === id);
-      if (!entryPlaced) {
-        this.repository.patchTrade(id, {
-          state: 'REJECTED',
-          closeReason: 'ERROR',
-          closeTime: Date.now(),
+      if (reservedLocally) {
+        const current = this.database.getActiveTrades('BINANCE').find((trade) => trade.id === id);
+        if (!entryPlaced) {
+          this.repository.patchTrade(id, {
+            state: 'REJECTED',
+            closeReason: 'ERROR',
+            closeTime: Date.now(),
+          });
+        } else if (current?.state !== 'SYNC_REQUIRED') {
+          this.repository.patchTrade(id, { state: 'SYNC_REQUIRED', closeReason: 'ERROR' });
+        }
+        this.database.addTradeEvent(id, 'TRADE_OPEN_FAILED', {
+          entryPlaced,
+          error: error instanceof Error ? error.message : String(error),
         });
-      } else if (current?.state !== 'SYNC_REQUIRED') {
-        this.repository.patchTrade(id, { state: 'SYNC_REQUIRED', closeReason: 'ERROR' });
       }
-      this.database.addTradeEvent(id, 'TRADE_OPEN_FAILED', {
-        entryPlaced,
-        error: error instanceof Error ? error.message : String(error),
-      });
       throw error;
     }
+  }
+
+  private async assertOpportunityStillFresh(opportunity: Opportunity): Promise<void> {
+    const ageMs = Date.now() - Number(opportunity.createdAt || 0);
+    if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > MAX_OPPORTUNITY_AGE_MS) {
+      this.repository.rejectOpportunity(opportunity.id, 'CRYPTO_STALE_OPPORTUNITY_AGE');
+      throw new Error(`CRYPTO_STALE_OPPORTUNITY_AGE:${Math.round(ageMs)}ms`);
+    }
+
+    const mark = await this.binance.getMarkPrice(opportunity.symbol);
+    const entry = Number(opportunity.entry);
+    const stop = Number(opportunity.stopLoss);
+    const tp = Number(opportunity.takeProfit);
+    const risk = Math.abs(entry - stop);
+    if (!(entry > 0 && stop > 0 && tp > 0 && risk > 0 && mark > 0)) {
+      this.repository.rejectOpportunity(opportunity.id, 'CRYPTO_INVALID_RETEST_GEOMETRY');
+      throw new Error('CRYPTO_INVALID_RETEST_GEOMETRY');
+    }
+
+    const invalidated = opportunity.side === 'BUY'
+      ? mark <= stop || mark >= tp
+      : mark >= stop || mark <= tp;
+    if (invalidated) {
+      this.repository.rejectOpportunity(opportunity.id, 'CRYPTO_RETEST_ALREADY_INVALIDATED_OR_TARGETED');
+      throw new Error(`CRYPTO_RETEST_ALREADY_INVALIDATED_OR_TARGETED:mark=${mark}`);
+    }
+
+    const driftR = Math.abs(mark - entry) / risk;
+    if (driftR > MAX_RETEST_DRIFT_R) {
+      this.repository.rejectOpportunity(opportunity.id, 'CRYPTO_RETEST_DRIFT_TOO_LARGE');
+      throw new Error(`CRYPTO_RETEST_DRIFT_TOO_LARGE:${driftR.toFixed(3)}R`);
+    }
+  }
+
+  private async assertOneWayModeCached(): Promise<void> {
+    if (Date.now() - this.oneWayVerifiedAt < 5 * 60_000) return;
+    if (this.oneWayVerification) return this.oneWayVerification;
+    this.oneWayVerification = this.assertOneWayMode()
+      .then(() => { this.oneWayVerifiedAt = Date.now(); })
+      .finally(() => { this.oneWayVerification = null; });
+    return this.oneWayVerification;
   }
 
   private async assertOneWayMode(): Promise<void> {
