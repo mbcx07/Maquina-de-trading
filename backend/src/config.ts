@@ -44,6 +44,8 @@ const envSchema = z.object({
   COMMODITY_REQUESTED_LEVERAGE: z.coerce.number().int().min(1).max(125).default(125),
   COMMODITY_LOOP_MS: z.coerce.number().int().min(500).max(60_000).default(1000),
   COMMODITY_MARKET_REFRESH_MS: z.coerce.number().int().min(500).max(30_000).default(2000),
+  // Compatibility alias used only by the retired R12 commodity module so the full TS project still compiles.
+  COMMODITY_REFRESH_MS: z.coerce.number().int().min(1000).max(120_000).default(30_000),
   COMMODITY_STREAM_MS: z.coerce.number().int().min(250).max(5000).default(500),
   COMMODITY_MAX_HOLD_SECONDS: z.coerce.number().int().min(30).max(900).default(180),
   COMMODITY_SIGNAL_SCORE_MIN: z.coerce.number().min(35).max(90).default(58),
