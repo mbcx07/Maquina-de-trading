@@ -19,8 +19,6 @@ async function main() {
   const aster = new AsterV3Client();
 
   const xau = await fetchVision('XAUUSDT', startTime, endTime, temp);
-  const crude = await fetchAster(aster, 'CLUSDT', startTime, endTime);
-
   const xauResult = xau.length >= 120
     ? runHistoricalBacktestR15({
         kind: 'XAU', candles: xau, sideMode: 'BOTH', assumedSpreadPct: env.COMMODITY_MAX_SPREAD_PCT_XAU * 0.5,
@@ -28,16 +26,25 @@ async function main() {
         leverage: 10, initialBalance: 50, marginPctPerTrade: env.COMMODITY_MARGIN_PCT,
       })
     : null;
-  const crudeResult = crude.length >= 120
-    ? runHistoricalBacktestR15({
-        kind: 'CRUDE', candles: crude, sideMode: 'BUY', assumedSpreadPct: env.COMMODITY_MAX_SPREAD_PCT_CL * 0.5,
-        feePct: env.COMMODITY_TAKER_FEE_PCT_ASTER, slippagePct: env.COMMODITY_SLIPPAGE_PCT,
-        leverage: 20, initialBalance: 50, marginPctPerTrade: env.COMMODITY_MARGIN_PCT,
-      })
-    : null;
-
   console.log('R15_BENCH_XAU', JSON.stringify(compact('XAUUSDT', xau, xauResult)));
-  console.log('R15_BENCH_CRUDE', JSON.stringify(compact('CLUSDT', crude, crudeResult)));
+
+  try {
+    const crude = await fetchAster(aster, 'CLUSDT', startTime, endTime);
+    const crudeResult = crude.length >= 120
+      ? runHistoricalBacktestR15({
+          kind: 'CRUDE', candles: crude, sideMode: 'BUY', assumedSpreadPct: env.COMMODITY_MAX_SPREAD_PCT_CL * 0.5,
+          feePct: env.COMMODITY_TAKER_FEE_PCT_ASTER, slippagePct: env.COMMODITY_SLIPPAGE_PCT,
+          leverage: 20, initialBalance: 50, marginPctPerTrade: env.COMMODITY_MARGIN_PCT,
+        })
+      : null;
+    console.log('R15_BENCH_CRUDE', JSON.stringify(compact('CLUSDT', crude, crudeResult)));
+  } catch (error) {
+    console.log('R15_BENCH_CRUDE_UNAVAILABLE', JSON.stringify({
+      symbol: 'CLUSDT',
+      reason: error instanceof Error ? error.message : String(error),
+      note: 'Aster may reject hosted CI regions. Run the in-app backtest from the Linux trading server for the authoritative CLUSDT result.',
+    }));
+  }
 }
 
 function compact(symbol: string, candles: CommodityCandleR15[], result: ReturnType<typeof runHistoricalBacktestR15> | null) {
