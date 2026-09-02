@@ -1,11 +1,12 @@
 {
   "name": "maquina-trading-v34-backend",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/dualCommodityRuntimeR14.ts",
-    "start": "tsx src/dualCommodityRuntimeR14.ts",
+    "dev": "tsx watch src/dualCommodityRuntimeR15.ts",
+    "start": "tsx src/dualCommodityRuntimeR15.ts",
+    "start:r15": "tsx src/dualCommodityRuntimeR15.ts",
     "start:r14": "tsx src/dualCommodityRuntimeR14.ts",
     "start:hybrid": "tsx src/hybridRuntime.ts",
     "start:commodities": "tsx src/commodityRuntime.ts",
