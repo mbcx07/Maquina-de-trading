@@ -3,8 +3,8 @@ set -euo pipefail
 
 BRANCH="feature/v34-dual-market-engine"
 COMPOSE="docker-compose.linux.yml"
-EXPECTED_RELEASE="2026.09.02-R14"
-EXPECTED_EDITION="XAU_CRUDE_DUAL_EXCHANGE_MT5"
+EXPECTED_RELEASE="2026.09.02-R15"
+EXPECTED_EDITION="XAU_CRUDE_DUAL_REALTIME_BACKTEST"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UPDATER_SOCKET="/run/quantum-updater/agent.sock"
 FROM_AGENT=0
@@ -14,7 +14,7 @@ cd "$ROOT"
 if [[ "$EUID" -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
 DOCKER=( $SUDO docker compose -f "$COMPOSE" )
 
-echo "== Quantum Commodities Dual R14 updater =="
+echo "== Quantum Commodities Dual R15 updater =="
 echo "Repo: $ROOT"
 echo "Mode: $([[ "$FROM_AGENT" -eq 1 ]] && echo WEB_AGENT || echo MANUAL)"
 
@@ -24,7 +24,6 @@ if [[ "$FROM_AGENT" -eq 0 ]]; then
     git status --short
     exit 2
   fi
-
   echo "[1/8] Descargando rama correcta..."
   git fetch origin "$BRANCH"
   git checkout "$BRANCH"
@@ -48,7 +47,7 @@ if [[ ! -S "$UPDATER_SOCKET" ]]; then
   exit 6
 fi
 
-echo "[3/8] Reconstruyendo R14 SIN cache..."
+echo "[3/8] Reconstruyendo R15 SIN cache..."
 "${DOCKER[@]}" build --no-cache backend frontend
 
 echo "[4/8] Recreando contenedores sin borrar SQLite..."
@@ -57,13 +56,13 @@ echo "[4/8] Recreando contenedores sin borrar SQLite..."
 echo "[5/8] Estado Docker:"
 "${DOCKER[@]}" ps
 
-echo "[6/8] Verificando backend R14..."
+echo "[6/8] Verificando backend R15..."
 BACKEND_OK=0
 for i in {1..50}; do
-  if curl -fsS http://127.0.0.1:8080/backend/health >/tmp/r14-health.json 2>/dev/null; then
-    cat /tmp/r14-health.json
+  if curl -fsS http://127.0.0.1:8080/backend/health >/tmp/r15-health.json 2>/dev/null; then
+    cat /tmp/r15-health.json
     echo
-    if grep -q "$EXPECTED_EDITION" /tmp/r14-health.json; then
+    if grep -q "$EXPECTED_EDITION" /tmp/r15-health.json; then
       BACKEND_OK=1
       break
     fi
@@ -71,16 +70,16 @@ for i in {1..50}; do
   sleep 1
 done
 if [[ "$BACKEND_OK" -ne 1 ]]; then
-  echo "ERROR: backend servido no es R14 Dual Commodities."
-  "${DOCKER[@]}" logs --tail=160 backend
+  echo "ERROR: backend servido no es R15 Dual Realtime/Backtest."
+  "${DOCKER[@]}" logs --tail=180 backend
   exit 4
 fi
 
 echo "[7/8] Verificando updater vía Nginx..."
 UPDATER_OK=0
 for i in {1..20}; do
-  if curl -fsS http://127.0.0.1:8080/updater/status >/tmp/r14-updater.json 2>/dev/null; then
-    cat /tmp/r14-updater.json
+  if curl -fsS http://127.0.0.1:8080/updater/status >/tmp/r15-updater.json 2>/dev/null; then
+    cat /tmp/r15-updater.json
     echo
     UPDATER_OK=1
     break
@@ -93,7 +92,7 @@ if [[ "$UPDATER_OK" -ne 1 ]]; then
   exit 7
 fi
 
-echo "[8/8] Verificando release/frontend R14..."
+echo "[8/8] Verificando release/frontend R15..."
 RELEASE_TEXT="$(curl -fsS -H 'Cache-Control: no-cache' "http://127.0.0.1:8080/release.txt?ts=$(date +%s)" || true)"
 printf '%s\n' "$RELEASE_TEXT"
 if [[ "$RELEASE_TEXT" != *"Release: $EXPECTED_RELEASE"* ]]; then
@@ -101,12 +100,12 @@ if [[ "$RELEASE_TEXT" != *"Release: $EXPECTED_RELEASE"* ]]; then
   exit 3
 fi
 HTML="$(curl -fsS -H 'Cache-Control: no-cache' "http://127.0.0.1:8080/?ts=$(date +%s)" || true)"
-if [[ "$HTML" != *"Quantum Dual Commodities R14"* ]]; then
-  echo "ERROR: index.html no muestra Quantum Dual Commodities R14."
+if [[ "$HTML" != *"Quantum Dual Commodities R15"* ]]; then
+  echo "ERROR: index.html no muestra Quantum Dual Commodities R15."
   exit 5
 fi
 
 echo
 printf 'OK. Release verificada: %s\n' "$EXPECTED_RELEASE"
-echo "En el navegador debes ver: BUILD R14 · XAU + CRUDE · EXCHANGE ↔ MT5."
-echo "Ya puedes buscar/aplicar próximas versiones desde la propia app."
+echo "En el navegador debes ver: BUILD R15 · REALTIME 500ms · BACKTEST."
+echo "Las siguientes versiones podrán aplicarse desde la propia app."
