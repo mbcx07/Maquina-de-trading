@@ -1,6 +1,6 @@
 import { env } from './config.js';
 import type { AsterV3Client } from './aster.js';
-import { effectiveSides, runHistoricalBacktestR15, type CommodityCandleR15, type CommodityKindR15, type CrudeSideModeR15, type HistoricalBacktestResultR15 } from './commodityStrategyR15.js';
+import { runHistoricalBacktestR15, type CommodityCandleR15, type CommodityKindR15, type CrudeSideModeR15, type HistoricalBacktestResultR15 } from './commodityStrategyR15.js';
 
 const MINUTE = 60_000;
 const DAY = 86_400_000;
@@ -98,8 +98,18 @@ export class CommodityBacktestR15 {
     const output: CommodityCandleR15[] = [];
     let cursor = startTime;
     let pages = 0;
+    let cooldownRetries = 0;
     while (cursor < endTime) {
       const response = await fetch(`${env.BINANCE_BASE_URL.replace(/\/$/, '')}/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=1m&startTime=${Math.floor(cursor)}&endTime=${Math.floor(endTime)}&limit=1500`);
+      if (response.status === 429 || response.status === 418) {
+        if (++cooldownRetries > 5) throw new Error(`BINANCE_BACKTEST_RATE_LIMIT_RETRIES_EXHAUSTED:${response.status}:${symbol}`);
+        const retryRaw = Number(response.headers.get('retry-after') ?? 0);
+        const fallbackSeconds = response.status === 418 ? 900 : 60;
+        const retrySeconds = Math.max(fallbackSeconds, Number.isFinite(retryRaw) ? retryRaw : 0);
+        await sleep(retrySeconds * 1000);
+        continue;
+      }
+      cooldownRetries = 0;
       if (!response.ok) throw new Error(`BINANCE_BACKTEST_HTTP_${response.status}:${symbol}`);
       const rows = await response.json() as any[];
       if (!Array.isArray(rows) || rows.length === 0) break;
@@ -111,7 +121,9 @@ export class CommodityBacktestR15 {
       pages++;
       this.updateProgress(kind, pages, output);
       if (rows.length < 1500) break;
-      await sleep(120);
+      // Large 1m ranges can require hundreds of pages. Keep the backtest below the
+      // normal USD-M request-weight envelope so it does not interfere with live scanning.
+      await sleep(350);
     }
     return dedupe(output);
   }
@@ -137,7 +149,7 @@ export class CommodityBacktestR15 {
       pages++;
       this.updateProgress(kind, pages, output);
       if (rows.length < 1500) break;
-      await sleep(120);
+      await sleep(250);
     }
     return dedupe(output);
   }
