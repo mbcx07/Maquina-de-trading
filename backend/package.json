@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/linuxRuntime.ts",
-    "start": "tsx src/linuxRuntime.ts",
+    "dev": "tsx watch src/hybridRuntime.ts",
+    "start": "tsx src/hybridRuntime.ts",
+    "start:hybrid": "tsx src/hybridRuntime.ts",
+    "start:legacy": "tsx src/linuxRuntime.ts",
     "start:commodities": "tsx src/commodityRuntime.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
