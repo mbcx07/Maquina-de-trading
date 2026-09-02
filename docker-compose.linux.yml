@@ -3,7 +3,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: ["npm", "run", "start:hybrid"]
+    command: ["npm", "run", "start:r14"]
     restart: unless-stopped
     environment:
       APP_MODE: ${APP_MODE:-PAPER}
@@ -12,14 +12,19 @@ services:
       LOCAL_VAULT_KEY_PATH: /app/data/.integration-vault-key
       DEFAULT_WORKSPACE_ID: default
 
-      # R13 commodities side: XAUUSDT on Binance + CLUSDT on Aster.
+      BINANCE_BASE_URL: ${BINANCE_BASE_URL:-https://fapi.binance.com}
+      BINANCE_TESTNET_BASE_URL: ${BINANCE_TESTNET_BASE_URL:-https://testnet.binancefuture.com}
+
       ASTER_USER: ${ASTER_USER:-}
       ASTER_SIGNER: ${ASTER_SIGNER:-}
       ASTER_PRIVATE_KEY: ${ASTER_PRIVATE_KEY:-}
       ASTER_BASE_URL: ${ASTER_BASE_URL:-https://fapi3.asterdex.com}
 
+      MT5_BRIDGE_URL: ${MT5_BRIDGE_URL:-http://host.docker.internal:8790}
+      MT5_BRIDGE_TOKEN: ${MT5_BRIDGE_TOKEN:-}
+
       COMMODITY_MARGIN_PCT: ${COMMODITY_MARGIN_PCT:-1}
-      COMMODITY_REQUESTED_LEVERAGE: ${COMMODITY_REQUESTED_LEVERAGE:-10}
+      COMMODITY_REQUESTED_LEVERAGE: ${COMMODITY_REQUESTED_LEVERAGE:-125}
       COMMODITY_LOOP_MS: ${COMMODITY_LOOP_MS:-5000}
       COMMODITY_REFRESH_MS: ${COMMODITY_REFRESH_MS:-30000}
       COMMODITY_MAX_HOLD_SECONDS: ${COMMODITY_MAX_HOLD_SECONDS:-180}
@@ -30,12 +35,19 @@ services:
       COMMODITY_TAKER_FEE_PCT_ASTER: ${COMMODITY_TAKER_FEE_PCT_ASTER:-0.05}
       COMMODITY_SLIPPAGE_PCT: ${COMMODITY_SLIPPAGE_PCT:-0.01}
       COMMODITY_ALLOW_REAL: ${COMMODITY_ALLOW_REAL:-false}
+
+      MT5_COMMODITY_MAX_SPREAD_PCT_XAU: ${MT5_COMMODITY_MAX_SPREAD_PCT_XAU:-0.08}
+      MT5_COMMODITY_MAX_SPREAD_PCT_CL: ${MT5_COMMODITY_MAX_SPREAD_PCT_CL:-0.12}
+      MT5_COMMODITY_COMMISSION_PCT: ${MT5_COMMODITY_COMMISSION_PCT:-0}
+      MT5_COMMODITY_SLIPPAGE_PCT: ${MT5_COMMODITY_SLIPPAGE_PCT:-0.005}
     volumes:
       - v34_data:/app/data
     expose:
       - "8787"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>r.json()).then(j=>{if(!j.ok||j.edition!=='CRYPTO_R11_FAST_PLUS_XAUUSDT_CLUSDT')process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>r.json()).then(j=>{if(!j.ok||j.edition!=='XAU_CRUDE_DUAL_EXCHANGE_MT5')process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -53,6 +65,8 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8080:80"
+    volumes:
+      - /run/quantum-updater.sock:/run/quantum-updater.sock
 
 volumes:
   v34_data:
