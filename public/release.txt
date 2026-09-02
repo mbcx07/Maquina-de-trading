@@ -1,28 +1,43 @@
-QUANTUM HYBRID R13 LINUX
-Release: 2026.09.02-R13
+QUANTUM DUAL COMMODITIES R14 LINUX
+Release: 2026.09.02-R14
 Branch: feature/v34-dual-market-engine
 
-Runtime: Crypto R11 + XAUUSD + CRUDE OIL. Legacy Twelve Data Forex scanner is OFF.
+FOCUS:
+- Only XAUUSD and CRUDE OIL.
+- Both markets are evaluated with the same 30-second microstructure / 1-minute context scalper on two execution venues for direct comparison.
+- General Crypto R11 and Twelve Data Forex scanners are NOT started by R14.
 
-CRYPTO R13 latency fixes:
-- Crypto keeps R11 M5/M15 calibrated sweep/reclaim/MSS + retest logic.
-- Legacy persisted maxConcurrentCryptoTrades=1 is migrated to 10; user can still change 1-10 from the dashboard.
-- Scanner continues scanning even with open Crypto positions. Open trades only consume their own slots.
-- Qualified symbols are scanned in concurrent chunks of 8 instead of 4.
-- Valid retests are sent to execution immediately after each scan micro-batch; the scanner no longer waits for the complete universe before opening them.
-- Selected Crypto opportunities execute concurrently instead of serial `for/await` execution.
-- SQLite performs final atomic slot/exposure reservation, so concurrent execution cannot exceed the configured max slots, account exposure, or one active position per symbol.
-- Opportunity anti-stale rule: max age 25 seconds. Immediately before reservation the Mark Price is rechecked; if the setup is already past SL/TP or has drifted more than 0.25R from the detected retest, it is rejected instead of chased late.
-- Crypto loop delay reduced to 10 seconds after each completed scan cycle.
-- Universe R11 qualification runs two symbols concurrently with a 350ms inter-batch pause. This exposes partially qualified markets sooner without returning to unsafe unrestricted execution.
+EXCHANGE LEG:
+- XAUUSD executes as XAUUSDT on Binance USD-M Futures; BUY and SELL.
+- CRUDE OIL executes as CLUSDT on Aster / Binance Wallet; BUY ONLY. SELL is hard-disabled.
+- Exchange execution uses the maximum leverage allowed by the contract when private leverage-bracket data is available. PAPER reports the leverage source/fallback explicitly.
+- 1% margin per trade. Contract LOT_SIZE / MIN_NOTIONAL rules are respected.
+- Cost gate includes real bid/ask spread, taker fees and slippage allowance. Gross TP must exceed the configured multiple of total round-trip costs.
 
-COMMODITIES:
-- XAUUSD executes as XAUUSDT on Binance Futures; BUY and SELL.
-- CRUDE OIL executes as CLUSDT on Aster Perpetuals; BUY ONLY. SELL remains hard-disabled in code.
-- Commodity scalper remains 30s trigger / 1m context and spread/cost aware. PAPER first; commodity REAL remains locked unless COMMODITY_ALLOW_REAL=true.
+FOREX / MT5 LEG:
+- MT5 bridge auto-detects the broker's XAU symbol and crude symbol (USOIL/XTIUSD/WTI/CL/etc., with Brent patterns lower priority).
+- Live broker bid/ask and spread are used on every decision.
+- M1 candles plus real broker ticks are used to build 30-second micro-bars.
+- PAPER sizing uses the broker's own margin calculator and broker account leverage; PnL is calculated using MT5 order_calc_profit.
+- REAL orders, when intentionally enabled by APP_MODE/configuration, are sent through MT5 with native SL/TP.
+- CRUDE OIL remains BUY ONLY on MT5 as well.
 
-UI R13:
-- Crypto is restored to the main Linux app; the prior R12 interpretation that removed Crypto is corrected.
-- Visible Crypto slots used/free/max, scanner progress, qualified models, opportunities, execution errors, active positions and recent trades.
-- Dashboard can set 1-10 max simultaneous Crypto positions; default/migrated value is 10.
-- XAUUSD and CRUDE OIL remain visible below Crypto. Forex/Twelve Data is removed from the active runtime.
+STRATEGY:
+- M1 EMA9/EMA21 + RSI14 + ATR14 context.
+- 30s pullback / displacement / flow trigger.
+- Spread-aware cost gate before entry.
+- Default max holding time 180 seconds.
+- The purpose of R14 is comparative PAPER validation: Exchange vs MT5 spread, leverage, WR, net PnL and holding time.
+
+UI R14:
+- Futuristic live candlestick chart with 30s / 1m toggle.
+- Exchange ↔ MT5 venue selector for the same market.
+- Live bid, ask, spread, leverage and current signal diagnostics.
+- Entry BUY/SELL markers, exit markers and active Entry / SL / TP horizontal levels directly on the chart.
+- Comparison cards and table for XAU Exchange, XAU MT5, Crude Exchange and Crude MT5.
+
+SAFE WEB UPDATE:
+- Host-side Quantum Update Agent exposes only status/check/apply over a local Unix socket; Docker socket is NOT mounted into the web application.
+- UI can search and apply newer versions without opening a terminal.
+- Auto-update checks periodically but will not apply while any tracked commodity position is open.
+- The updater refuses a dirty Git working tree and runs Git as the repository owner while privileged deployment is isolated to the update script.
