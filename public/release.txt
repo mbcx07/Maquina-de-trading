@@ -1,49 +1,42 @@
-QUANTUM DUAL COMMODITIES R15 LINUX
-Release: 2026.09.02-R15
+QUANTUM DUAL COMMODITIES R15.1 LINUX
+Release: 2026.09.02-R15.1
 Branch: feature/v34-dual-market-engine
 
-FOCUS:
-- Only XAUUSD and CRUDE OIL.
-- Both are compared on Exchange and MT5.
-- Exchange PAPER and MT5 PAPER start separate R15 sessions at $50 USD each.
+VALIDATED MODEL:
+- XAUUSDT Exchange PAPER only.
+- Strategy: TSMOM 16h.
+- Signal timeframe: 15m.
+- Regime confirmation: 4h EMA20/EMA50.
+- Momentum lookback: 64 x 15m = 16 hours.
+- Entry threshold: absolute 16h momentum >= 1.0%.
+- Volatility filter: current ATR14% >= trailing 100-bar ATR% average.
+- Holding period: 64 x 15m = about 16 hours.
+- BUY and SELL allowed.
+- Margin per trade: 1% of PAPER balance.
+- Leverage: 10x.
+- PAPER initial balance: $50.
 
-SIGNALS R15:
-- Replaces the overly strict all-or-nothing trigger with a visible confluence score.
-- Live context: M1 EMA9/EMA21, RSI14, ATR14 plus 30-second microstructure and taker/tick flow.
-- Default admission threshold: score >= 58.
-- Spread/cost gate remains a hard veto: expected gross target must cover spread + fees + slippage by the configured edge multiple.
-- Dashboard exposes LONG score, SHORT score, threshold, blockers and fulfilled confluences so WAIT is diagnosable.
+ROBUSTNESS RESULTS ON XAUUSDT:
+- 94 historical trades.
+- Win rate 54.26%.
+- Profit Factor 1.336.
+- Return +1.584% on account using 1% margin / 10x.
+- Max drawdown 0.867%.
+- Blind test: 19 trades, WR 42.11%, PF 1.173, return +0.154%.
+- Cost stress 1.5x: +0.846%.
+- Cost stress 2.0x: +0.114%.
+- Parameter-neighborhood blind-test positivity: 55.56%.
+- 10,000-run bootstrap Monte Carlo loss probability: 14.42%.
+- Result: ROBUST_PASS for PAPER validation, NOT approved for REAL.
 
-CRUDE DIRECTION:
-- Default BUY.
-- User can switch CRUDE OIL to BUY only, SELL only or BOTH from the dashboard.
-- The selected mode applies to CLUSDT/Aster and the broker crude symbol on MT5 simultaneously.
+QUARANTINED MODELS:
+- The old 30s/1m scalper is disabled for automatic entries after failing 240-day edge scans.
+- It remains available only for live charting, market data and diagnostics.
+- XAU MT5 is OBSERVE_ONLY until the broker-spread version is independently validated.
+- CRUDE Exchange and CRUDE MT5 are OBSERVE_ONLY until a crude-specific model survives validation.
 
-PAPER COMPARISON:
-- Exchange R15 PAPER session starts at $50.
-- MT5 R15 PAPER session starts at $50.
-- Historical R14 rows are retained but do not affect the new R15 PAPER balances/statistics.
-- Exchange still uses maximum leverage allowed by the contract when available.
-- MT5 sizing is scaled to the $50 virtual account while respecting broker minimum/step size; broker bid/ask spread is included.
-
-REALTIME CHART:
-- Full candle/history payload refreshes periodically.
-- A dedicated Server-Sent Events stream updates live bid/ask/spread every 500 ms by default.
-- 30s micro-bar is merged into the chart without waiting for the full page refresh.
-- Larger labels, higher contrast, live BUY/SELL/ENTRY/SL/TP markers and a visible stream status.
-
-BACKTEST:
-- In-app Exchange backtest supports 7D / 30D / 90D / MAX.
-- MAX walks paginated 1-minute history backwards up to COMMODITY_BACKTEST_MAX_DAYS (default 365) or until the contract has no older data.
-- Binance klines are paginated with up to 1500 candles per request.
-- Historical result is explicitly labelled HISTORICAL_1M_APPROXIMATION because standard historical 30-second taker-flow candles are not available through the normal kline endpoint.
-- Forward PAPER remains the exact 30s/1m comparison and is shown alongside historical WR, PF, return, DD and final balance.
-
-VENUES:
-- XAU Exchange: XAUUSDT on Binance USD-M Futures.
-- CRUDE Exchange: CLUSDT on Aster / Binance Wallet.
-- MT5 auto-detects XAU and crude symbols and uses live broker bid/ask spread.
-
-SAFE WEB UPDATE:
-- Quantum Update Agent remains host-side over a local Unix socket; Docker socket is not mounted into the web app.
-- Updates are blocked while tracked positions are open.
+LIVE APP:
+- Realtime Exchange/MT5 charts remain available.
+- R15.1 state exposes XAU TSMOM diagnostic, PAPER balance, current momentum, regime EMAs and forward trades.
+- Engine START/PAUSE controls only the validated XAU TSMOM PAPER service.
+- REAL execution is intentionally not part of this release.
