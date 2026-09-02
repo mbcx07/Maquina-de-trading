@@ -3,7 +3,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: ["npm", "run", "start:commodities"]
+    command: ["npm", "run", "start:hybrid"]
     restart: unless-stopped
     environment:
       APP_MODE: ${APP_MODE:-PAPER}
@@ -12,8 +12,7 @@ services:
       LOCAL_VAULT_KEY_PATH: /app/data/.integration-vault-key
       DEFAULT_WORKSPACE_ID: default
 
-      # R12: only XAUUSDT on Binance + CLUSDT on Aster.
-      # Aster secrets are read from the local root .env file via Compose interpolation.
+      # R13 commodities side: XAUUSDT on Binance + CLUSDT on Aster.
       ASTER_USER: ${ASTER_USER:-}
       ASTER_SIGNER: ${ASTER_SIGNER:-}
       ASTER_PRIVATE_KEY: ${ASTER_PRIVATE_KEY:-}
@@ -36,7 +35,7 @@ services:
     expose:
       - "8787"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>r.json()).then(j=>{if(!j.ok||j.edition!=='XAUUSDT_BINANCE_CLUSDT_ASTER')process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>r.json()).then(j=>{if(!j.ok||j.edition!=='CRYPTO_R11_FAST_PLUS_XAUUSDT_CLUSDT')process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -52,8 +51,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    # Security default: do not expose trading controls directly to the Internet.
-    # Reach it through an SSH tunnel or a private VPN such as Tailscale.
     ports:
       - "127.0.0.1:8080:80"
 
