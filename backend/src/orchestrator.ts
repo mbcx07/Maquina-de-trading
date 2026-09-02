@@ -51,24 +51,32 @@ export class OpportunityOrchestrator {
     const selectedForex = selectForexOpportunities(eligibleForex, context);
     const executionResults: Array<Record<string, unknown>> = [];
 
-    if (autoExecute && settings.engineEnabled) {
-      for (const opportunity of selectedCrypto) {
-        try {
+    if (autoExecute && settings.engineEnabled && selectedCrypto.length) {
+      // Important latency rule: Binance opportunities are independent symbols and are
+      // intentionally launched together. The executor performs the final SQLite atomic
+      // reservation, so concurrent promises cannot exceed max slots or duplicate a symbol.
+      // This avoids a slow first order making later retest opportunities stale.
+      const settled = await Promise.allSettled(
+        selectedCrypto.map(async (opportunity) => {
           const trade = await this.cryptoExecution.execute(opportunity);
-          executionResults.push({ opportunityId: opportunity.id, broker: 'BINANCE', ok: true, tradeId: trade.id });
-        } catch (error) {
-          executionResults.push({
-            opportunityId: opportunity.id,
-            broker: 'BINANCE',
-            ok: false,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+          return { opportunityId: opportunity.id, broker: 'BINANCE', ok: true, tradeId: trade.id } as Record<string, unknown>;
+        }),
+      );
+
+      for (let i = 0; i < settled.length; i++) {
+        const item = settled[i];
+        const opportunity = selectedCrypto[i];
+        if (item.status === 'fulfilled') executionResults.push(item.value);
+        else executionResults.push({
+          opportunityId: opportunity.id,
+          broker: 'BINANCE',
+          ok: false,
+          error: item.reason instanceof Error ? item.reason.message : String(item.reason),
+        });
       }
     }
 
-    // Hard product rule for the Linux individual edition: Forex can be ranked and
-    // surfaced as a signal, but this orchestrator never creates an MT5/Forex trade.
+    // Legacy Forex path remains signal-only when invoked from the old runtime.
     for (const opportunity of selectedForex) {
       executionResults.push({
         opportunityId: opportunity.id,
