@@ -6,6 +6,7 @@ COMPOSE="docker-compose.linux.yml"
 EXPECTED_RELEASE="2026.09.02-R14"
 EXPECTED_EDITION="XAU_CRUDE_DUAL_EXCHANGE_MT5"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+UPDATER_SOCKET="/run/quantum-updater/agent.sock"
 FROM_AGENT=0
 if [[ "${1:-}" == "--from-agent" ]]; then FROM_AGENT=1; fi
 cd "$ROOT"
@@ -42,8 +43,8 @@ else
   echo "[2/8] Update Agent ya está ejecutando este despliegue."
 fi
 
-if [[ ! -S /run/quantum-updater.sock ]]; then
-  echo "ERROR: falta /run/quantum-updater.sock; no iniciaré frontend con un mount inválido."
+if [[ ! -S "$UPDATER_SOCKET" ]]; then
+  echo "ERROR: falta $UPDATER_SOCKET; no iniciaré frontend con un mount inválido."
   exit 6
 fi
 
