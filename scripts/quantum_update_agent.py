@@ -13,7 +13,7 @@ from pathlib import Path
 
 REPO = Path(os.environ.get("QUANTUM_REPO_ROOT", "/opt/quantum-trading")).resolve()
 BRANCH = os.environ.get("QUANTUM_UPDATE_BRANCH", "feature/v34-dual-market-engine")
-SOCKET_PATH = os.environ.get("QUANTUM_UPDATE_SOCKET", "/run/quantum-updater.sock")
+SOCKET_PATH = os.environ.get("QUANTUM_UPDATE_SOCKET", "/run/quantum-updater/agent.sock")
 LOG_PATH = Path(os.environ.get("QUANTUM_UPDATE_LOG", "/var/log/quantum-updater.log"))
 
 _lock = threading.Lock()
@@ -145,7 +145,6 @@ def apply_update() -> None:
             ("FETCH", ["git", "fetch", "origin", BRANCH], True),
             ("CHECKOUT", ["git", "checkout", BRANCH], True),
             ("RESET", ["git", "reset", "--hard", f"origin/{BRANCH}"], True),
-            # Deployment needs root for Docker/systemd. Git has already run as repo owner.
             ("DEPLOY", ["bash", "update-v34-linux.sh", "--from-agent"], False),
         ]
         for phase, args, git_as_owner in steps:
@@ -182,7 +181,7 @@ class UnixHTTPServer(socketserver.UnixStreamServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "QuantumUpdater/1.1"
+    server_version = "QuantumUpdater/1.2"
 
     def log_message(self, fmt: str, *args) -> None:
         return
@@ -225,11 +224,13 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     if not REPO.exists():
         raise SystemExit(f"Repository does not exist: {REPO}")
+    socket_parent = Path(SOCKET_PATH).parent
+    socket_parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(socket_parent, 0o755)
     try:
         os.unlink(SOCKET_PATH)
     except FileNotFoundError:
         pass
-    Path(SOCKET_PATH).parent.mkdir(parents=True, exist_ok=True)
     server = UnixHTTPServer(SOCKET_PATH, Handler)
     os.chmod(SOCKET_PATH, 0o666)
     append_log(f"[{time.strftime('%F %T')}] agent started repo={REPO} owner={repo_owner()[0]} branch={BRANCH}")
