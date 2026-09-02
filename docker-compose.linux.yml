@@ -3,23 +3,44 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    command: ["npm", "run", "start:commodities"]
     restart: unless-stopped
     environment:
-      APP_MODE: PAPER
+      APP_MODE: ${APP_MODE:-PAPER}
       PORT: 8787
       DB_PATH: /app/data/trading-v34.sqlite
       LOCAL_VAULT_KEY_PATH: /app/data/.integration-vault-key
       DEFAULT_WORKSPACE_ID: default
+
+      # R12: only XAUUSDT on Binance + CLUSDT on Aster.
+      # Aster secrets are read from the local root .env file via Compose interpolation.
+      ASTER_USER: ${ASTER_USER:-}
+      ASTER_SIGNER: ${ASTER_SIGNER:-}
+      ASTER_PRIVATE_KEY: ${ASTER_PRIVATE_KEY:-}
+      ASTER_BASE_URL: ${ASTER_BASE_URL:-https://fapi3.asterdex.com}
+
+      COMMODITY_MARGIN_PCT: ${COMMODITY_MARGIN_PCT:-1}
+      COMMODITY_REQUESTED_LEVERAGE: ${COMMODITY_REQUESTED_LEVERAGE:-10}
+      COMMODITY_LOOP_MS: ${COMMODITY_LOOP_MS:-5000}
+      COMMODITY_REFRESH_MS: ${COMMODITY_REFRESH_MS:-30000}
+      COMMODITY_MAX_HOLD_SECONDS: ${COMMODITY_MAX_HOLD_SECONDS:-180}
+      COMMODITY_MIN_EDGE_MULTIPLE: ${COMMODITY_MIN_EDGE_MULTIPLE:-2.5}
+      COMMODITY_MAX_SPREAD_PCT_XAU: ${COMMODITY_MAX_SPREAD_PCT_XAU:-0.05}
+      COMMODITY_MAX_SPREAD_PCT_CL: ${COMMODITY_MAX_SPREAD_PCT_CL:-0.08}
+      COMMODITY_TAKER_FEE_PCT_BINANCE: ${COMMODITY_TAKER_FEE_PCT_BINANCE:-0.05}
+      COMMODITY_TAKER_FEE_PCT_ASTER: ${COMMODITY_TAKER_FEE_PCT_ASTER:-0.05}
+      COMMODITY_SLIPPAGE_PCT: ${COMMODITY_SLIPPAGE_PCT:-0.01}
+      COMMODITY_ALLOW_REAL: ${COMMODITY_ALLOW_REAL:-false}
     volumes:
       - v34_data:/app/data
     expose:
       - "8787"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>r.json()).then(j=>{if(!j.ok||j.edition!=='XAUUSDT_BINANCE_CLUSDT_ASTER')process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 30s
 
   frontend:
     build:
