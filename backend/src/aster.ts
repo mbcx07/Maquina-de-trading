@@ -167,10 +167,11 @@ export class AsterV3Client {
       .filter((row) => Number.isFinite(row.time) && row.close > 0);
   }
 
-  async getAggTrades(symbol: string, startTime: number, endTime: number): Promise<AsterAggTrade[]> {
-    const rows = await this.publicRequest<any[]>('/fapi/v3/aggTrades', {
-      symbol: symbol.toUpperCase(), startTime: Math.floor(startTime), endTime: Math.floor(endTime), limit: 1000,
-    });
+  async getAggTrades(symbol: string, startTime?: number, endTime?: number): Promise<AsterAggTrade[]> {
+    const params: Record<string, string | number | undefined> = { symbol: symbol.toUpperCase(), limit: 1000 };
+    if (startTime !== undefined) params.startTime = Math.floor(startTime);
+    if (endTime !== undefined) params.endTime = Math.floor(endTime);
+    const rows = await this.publicRequest<any[]>('/fapi/v3/aggTrades', params);
     return (Array.isArray(rows) ? rows : []).map((row) => ({
       id: Number(row.a ?? 0), price: Number(row.p ?? 0), qty: Number(row.q ?? 0), time: Number(row.T ?? row.time ?? 0), buyerIsMaker: Boolean(row.m),
     })).filter((row) => row.time > 0 && row.price > 0 && row.qty > 0);
@@ -229,5 +230,9 @@ export class AsterV3Client {
     return this.signedRequest('/fapi/v3/order', 'POST', {
       symbol: symbol.toUpperCase(), side: exitSide, type, stopPrice, closePosition: 'true', workingType: 'MARK_PRICE', priceProtect: 'TRUE', newOrderRespType: 'RESULT',
     });
+  }
+
+  async cancelAllOpenOrders(symbol: string): Promise<void> {
+    await this.signedRequest('/fapi/v3/allOpenOrders', 'DELETE', { symbol: symbol.toUpperCase() });
   }
 }
