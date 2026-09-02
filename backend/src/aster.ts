@@ -169,8 +169,12 @@ export class AsterV3Client {
 
   async getAggTrades(symbol: string, startTime?: number, endTime?: number): Promise<AsterAggTrade[]> {
     const params: Record<string, string | number | undefined> = { symbol: symbol.toUpperCase(), limit: 1000 };
-    if (startTime !== undefined) params.startTime = Math.floor(startTime);
-    if (endTime !== undefined) params.endTime = Math.floor(endTime);
+    // Aster restricts explicit start/end windows. Passing 0 -> now creates an invalid huge interval,
+    // so zero/omitted means "latest trades". Explicit windows are capped by callers to <1 hour.
+    if (startTime !== undefined && startTime > 0) {
+      params.startTime = Math.floor(startTime);
+      if (endTime !== undefined && endTime >= startTime) params.endTime = Math.floor(endTime);
+    }
     const rows = await this.publicRequest<any[]>('/fapi/v3/aggTrades', params);
     return (Array.isArray(rows) ? rows : []).map((row) => ({
       id: Number(row.a ?? 0), price: Number(row.p ?? 0), qty: Number(row.q ?? 0), time: Number(row.T ?? row.time ?? 0), buyerIsMaker: Boolean(row.m),
