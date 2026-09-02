@@ -220,8 +220,8 @@ export class AsterV3Client {
   async getMaxAllowedLeverage(symbol = 'CLUSDT'): Promise<number> {
     if (!this.hasCredentials()) return 20;
     try {
-      const rows = await this.signedRequest<any[]>('/fapi/v3/leverageBracket', 'GET', { symbol: symbol.toUpperCase() });
-      const brackets = rows?.[0]?.brackets ?? rows?.brackets ?? [];
+      const payload = await this.signedRequest<any>('/fapi/v3/leverageBracket', 'GET', { symbol: symbol.toUpperCase() });
+      const brackets = Array.isArray(payload) ? payload?.[0]?.brackets ?? [] : payload?.brackets ?? [];
       const values = (Array.isArray(brackets) ? brackets : [])
         .map((row: any) => Number(row.initialLeverage ?? row.leverage ?? 0))
         .filter((value: number) => Number.isFinite(value) && value > 0);
