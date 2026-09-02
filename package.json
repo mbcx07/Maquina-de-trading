@@ -1,12 +1,11 @@
 {
-  "name": "quantautonoma---autonomous-trading-system",
+  "name": "quantum-commodities-r12",
   "private": true,
-  "version": "0.0.0",
+  "version": "12.0.0",
   "type": "module",
   "scripts": {
-    "prepare:r11": "node scripts/prepare-r11.mjs",
-    "dev": "npm run prepare:r11 && vite",
-    "build": "npm run prepare:r11 && vite build",
+    "dev": "vite",
+    "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
