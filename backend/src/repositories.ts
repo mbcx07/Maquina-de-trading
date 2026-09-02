@@ -1,6 +1,8 @@
 import type { Opportunity, TradeRecord, TradeState } from './types.js';
 import { TradingDatabase } from './database.js';
 
+const ACTIVE_TRADE_STATES = "('PENDING','OPENING','OPEN','CLOSING','SYNC_REQUIRED')";
+
 export class TradingRepository {
   constructor(private readonly database: TradingDatabase) {}
 
@@ -44,7 +46,7 @@ export class TradingRepository {
 
   createTradeAtomically(trade: TradeRecord): void {
     const insert = this.database.db.transaction(() => {
-      // The SQLite partial unique index is the final concurrency guard for Crypto.
+      // The SQLite partial unique index is the final concurrency guard per symbol.
       this.database.createTrade(trade);
       this.database.addTradeEvent(trade.id, 'TRADE_RESERVED', {
         broker: trade.broker,
@@ -53,6 +55,72 @@ export class TradingRepository {
       });
     });
     insert();
+  }
+
+  /**
+   * Final Crypto concurrency guard.
+   *
+   * Several opportunities can now execute in parallel. Selection-side slot checks are
+   * intentionally not trusted as the final authority because two promises can observe
+   * the same free slot before either has inserted its OPENING row. SQLite serializes this
+   * transaction, so max slots + max allocated margin + one-position-per-symbol remain
+   * deterministic even under concurrent execution.
+   */
+  reserveCryptoTradeAtomically(
+    trade: TradeRecord,
+    maxSlots: number,
+    maxAllocatedMargin: number,
+  ): { activeBefore: number; allocatedMarginBefore: number } {
+    if (trade.broker !== 'BINANCE') throw new Error('CRYPTO_RESERVATION_REQUIRES_BINANCE_TRADE');
+    const mode = trade.executionMode ?? 'REAL';
+    const normalizedMaxSlots = Math.max(1, Math.min(10, Math.floor(maxSlots)));
+    const marginRequired = Math.max(0, Number(trade.marginUsed ?? 0));
+
+    const reserve = this.database.db.transaction(() => {
+      const countRow = this.database.db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM trades
+        WHERE broker='BINANCE' AND execution_mode=? AND state IN ${ACTIVE_TRADE_STATES}
+      `).get(mode) as { n: number };
+      const activeBefore = Number(countRow?.n ?? 0);
+      if (activeBefore >= normalizedMaxSlots) throw new Error('CRYPTO_MAX_SLOTS_REACHED_ATOMIC');
+
+      const marginRow = this.database.db.prepare(`
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN margin_used IS NOT NULL AND margin_used > 0 THEN margin_used
+            WHEN notional IS NOT NULL AND leverage IS NOT NULL AND leverage > 0 THEN notional / leverage
+            ELSE 0
+          END
+        ), 0) AS allocated
+        FROM trades
+        WHERE broker='BINANCE' AND execution_mode=? AND state IN ${ACTIVE_TRADE_STATES}
+      `).get(mode) as { allocated: number };
+      const allocatedMarginBefore = Math.max(0, Number(marginRow?.allocated ?? 0));
+      if (allocatedMarginBefore + marginRequired > Math.max(0, maxAllocatedMargin) + 1e-9) {
+        throw new Error(
+          `CRYPTO_ACCOUNT_EXPOSURE_LIMIT_ATOMIC:allocated=${allocatedMarginBefore.toFixed(4)}:new=${marginRequired.toFixed(4)}:max=${Math.max(0, maxAllocatedMargin).toFixed(4)}`,
+        );
+      }
+
+      // ux_binance_active_mode_symbol remains the final duplicate-symbol guard.
+      this.database.createTrade(trade);
+      this.database.addTradeEvent(trade.id, 'TRADE_RESERVED', {
+        broker: trade.broker,
+        symbol: trade.symbol,
+        signalId: trade.signalId,
+        executionMode: mode,
+        concurrentReservation: true,
+        activeBefore,
+        allocatedMarginBefore,
+        marginRequired,
+        maxSlots: normalizedMaxSlots,
+        maxAllocatedMargin,
+      });
+      return { activeBefore, allocatedMarginBefore };
+    });
+
+    return reserve();
   }
 
   getTrade(id: string): TradeRecord | null {
