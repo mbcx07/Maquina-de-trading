@@ -49,6 +49,28 @@ export interface Mt5MarketSnapshot {
   timeMsc: number;
 }
 
+export interface Mt5SymbolInfo {
+  name: string;
+  path: string;
+  visible: boolean;
+  tradeMode: number;
+  currencyBase?: string;
+  currencyProfit?: string;
+  volumeMin: number;
+  volumeMax: number;
+  volumeStep: number;
+}
+
+export interface Mt5Tick {
+  timeMsc: number;
+  bid: number;
+  ask: number;
+  last: number;
+  price: number;
+  volume: number;
+  flags: number;
+}
+
 export interface Mt5Deal {
   ticket: number;
   order: number;
@@ -142,8 +164,25 @@ export class Mt5BridgeClient {
     return this.request(`/positions${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`);
   }
 
+  symbols(): Promise<Mt5SymbolInfo[]> {
+    return this.request('/market/symbols');
+  }
+
   marketSnapshot(symbol: string): Promise<Mt5MarketSnapshot> {
     return this.request(`/market/snapshot/${encodeURIComponent(symbol)}`);
+  }
+
+  ticks(symbol: string, seconds = 300, limit = 5000): Promise<Mt5Tick[]> {
+    return this.request(
+      `/market/ticks/${encodeURIComponent(symbol)}?seconds=${Math.max(30, Math.min(1800, seconds))}&limit=${Math.max(50, Math.min(20000, limit))}`,
+    );
+  }
+
+  calculateProfit(input: { symbol: string; side: TradeSide; volume: number; entry: number; exit: number }): Promise<number> {
+    return this.request<{ profit: number }>('/market/calc-profit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }).then((row) => Number(row.profit ?? 0));
   }
 
   history(positionTicket: number): Promise<Mt5PositionHistory> {
@@ -193,6 +232,8 @@ export class Mt5BridgeClient {
     side: TradeSide;
     entry: number;
     sl: number;
+    percent?: number;
+    mode?: 'RISK_TO_SL' | 'MARGIN_PERCENT';
   }): Promise<Mt5SizeResult> {
     const settings = this.getSettings();
     return this.request('/size', {
@@ -202,8 +243,8 @@ export class Mt5BridgeClient {
         side: input.side,
         entry: input.entry,
         sl: input.sl,
-        percent: settings.forexPctPerTrade,
-        mode: settings.forexRiskMode,
+        percent: input.percent ?? settings.forexPctPerTrade,
+        mode: input.mode ?? settings.forexRiskMode,
       }),
     });
   }
