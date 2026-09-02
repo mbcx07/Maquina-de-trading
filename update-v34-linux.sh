@@ -3,43 +3,66 @@ set -euo pipefail
 
 BRANCH="feature/v34-dual-market-engine"
 COMPOSE="docker-compose.linux.yml"
-EXPECTED_RELEASE="2026.09.02-R13"
-EXPECTED_EDITION="CRYPTO_R11_FAST_PLUS_XAUUSDT_CLUSDT"
+EXPECTED_RELEASE="2026.09.02-R14"
+EXPECTED_EDITION="XAU_CRUDE_DUAL_EXCHANGE_MT5"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FROM_AGENT=0
+if [[ "${1:-}" == "--from-agent" ]]; then FROM_AGENT=1; fi
 cd "$ROOT"
 
-echo "== Quantum Hybrid R13 updater =="
-echo "Repo: $ROOT"
+if [[ "$EUID" -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
+DOCKER=( $SUDO docker compose -f "$COMPOSE" )
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "ERROR: el repositorio tiene cambios locales. No haré reset para no borrarlos."
-  git status --short
-  exit 2
+echo "== Quantum Commodities Dual R14 updater =="
+echo "Repo: $ROOT"
+echo "Mode: $([[ "$FROM_AGENT" -eq 1 ]] && echo WEB_AGENT || echo MANUAL)"
+
+if [[ "$FROM_AGENT" -eq 0 ]]; then
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo "ERROR: el repositorio tiene cambios locales. No haré reset para no borrarlos."
+    git status --short
+    exit 2
+  fi
+
+  echo "[1/8] Descargando rama correcta..."
+  git fetch origin "$BRANCH"
+  git checkout "$BRANCH"
+  git reset --hard "origin/$BRANCH"
+else
+  echo "[1/8] Git ya fue actualizado por Quantum Update Agent."
 fi
 
-echo "[1/6] Descargando rama correcta..."
-git fetch origin "$BRANCH"
-git checkout "$BRANCH"
-git reset --hard "origin/$BRANCH"
-COMMIT="$(git rev-parse --short HEAD)"
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
 echo "Commit desplegado: $COMMIT"
 
-echo "[2/6] Reconstruyendo R13 SIN cache..."
-sudo docker compose -f "$COMPOSE" build --no-cache backend frontend
+if [[ "$FROM_AGENT" -eq 0 ]]; then
+  echo "[2/8] Instalando/actualizando Quantum Update Agent local..."
+  $SUDO bash scripts/install-update-agent.sh "$ROOT"
+else
+  echo "[2/8] Update Agent ya está ejecutando este despliegue."
+fi
 
-echo "[3/6] Recreando contenedores sin borrar SQLite..."
-sudo docker compose -f "$COMPOSE" up -d --force-recreate --remove-orphans
+if [[ ! -S /run/quantum-updater.sock ]]; then
+  echo "ERROR: falta /run/quantum-updater.sock; no iniciaré frontend con un mount inválido."
+  exit 6
+fi
 
-echo "[4/6] Estado Docker:"
-sudo docker compose -f "$COMPOSE" ps
+echo "[3/8] Reconstruyendo R14 SIN cache..."
+"${DOCKER[@]}" build --no-cache backend frontend
 
-echo "[5/6] Verificando backend R13..."
+echo "[4/8] Recreando contenedores sin borrar SQLite..."
+"${DOCKER[@]}" up -d --force-recreate --remove-orphans
+
+echo "[5/8] Estado Docker:"
+"${DOCKER[@]}" ps
+
+echo "[6/8] Verificando backend R14..."
 BACKEND_OK=0
-for i in {1..40}; do
-  if curl -fsS http://127.0.0.1:8080/backend/health >/tmp/r13-health.json 2>/dev/null; then
-    cat /tmp/r13-health.json
+for i in {1..50}; do
+  if curl -fsS http://127.0.0.1:8080/backend/health >/tmp/r14-health.json 2>/dev/null; then
+    cat /tmp/r14-health.json
     echo
-    if grep -q "$EXPECTED_EDITION" /tmp/r13-health.json; then
+    if grep -q "$EXPECTED_EDITION" /tmp/r14-health.json; then
       BACKEND_OK=1
       break
     fi
@@ -47,12 +70,29 @@ for i in {1..40}; do
   sleep 1
 done
 if [[ "$BACKEND_OK" -ne 1 ]]; then
-  echo "ERROR: backend servido no es R13 Hybrid."
-  sudo docker compose -f "$COMPOSE" logs --tail=120 backend
+  echo "ERROR: backend servido no es R14 Dual Commodities."
+  "${DOCKER[@]}" logs --tail=160 backend
   exit 4
 fi
 
-echo "[6/6] Verificando release/frontend R13..."
+echo "[7/8] Verificando updater vía Nginx..."
+UPDATER_OK=0
+for i in {1..20}; do
+  if curl -fsS http://127.0.0.1:8080/updater/status >/tmp/r14-updater.json 2>/dev/null; then
+    cat /tmp/r14-updater.json
+    echo
+    UPDATER_OK=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ "$UPDATER_OK" -ne 1 ]]; then
+  echo "ERROR: Quantum Update Agent no es accesible vía /updater/status."
+  $SUDO systemctl status quantum-update-agent.service --no-pager || true
+  exit 7
+fi
+
+echo "[8/8] Verificando release/frontend R14..."
 RELEASE_TEXT="$(curl -fsS -H 'Cache-Control: no-cache' "http://127.0.0.1:8080/release.txt?ts=$(date +%s)" || true)"
 printf '%s\n' "$RELEASE_TEXT"
 if [[ "$RELEASE_TEXT" != *"Release: $EXPECTED_RELEASE"* ]]; then
@@ -60,13 +100,12 @@ if [[ "$RELEASE_TEXT" != *"Release: $EXPECTED_RELEASE"* ]]; then
   exit 3
 fi
 HTML="$(curl -fsS -H 'Cache-Control: no-cache' "http://127.0.0.1:8080/?ts=$(date +%s)" || true)"
-if [[ "$HTML" != *"Quantum R13"* ]]; then
-  echo "ERROR: index.html no muestra Quantum R13."
+if [[ "$HTML" != *"Quantum Dual Commodities R14"* ]]; then
+  echo "ERROR: index.html no muestra Quantum Dual Commodities R14."
   exit 5
 fi
 
 echo
 printf 'OK. Release verificada: %s\n' "$EXPECTED_RELEASE"
-echo "En el navegador debes ver: BUILD R13 · CRYPTO FAST · XAU + CRUDE."
-echo "Crypto: hasta 10 slots simultáneos, ejecución paralela, anti-stale 25s/0.25R."
-echo "TradFi: XAUUSDT BUY/SELL · CLUSDT BUY-ONLY. Forex/Twelve Data OFF."
+echo "En el navegador debes ver: BUILD R14 · XAU + CRUDE · EXCHANGE ↔ MT5."
+echo "Ya puedes buscar/aplicar próximas versiones desde la propia app."
