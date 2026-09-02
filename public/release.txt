@@ -1,43 +1,49 @@
-QUANTUM DUAL COMMODITIES R14 LINUX
-Release: 2026.09.02-R14
+QUANTUM DUAL COMMODITIES R15 LINUX
+Release: 2026.09.02-R15
 Branch: feature/v34-dual-market-engine
 
 FOCUS:
 - Only XAUUSD and CRUDE OIL.
-- Both markets are evaluated with the same 30-second microstructure / 1-minute context scalper on two execution venues for direct comparison.
-- General Crypto R11 and Twelve Data Forex scanners are NOT started by R14.
+- Both are compared on Exchange and MT5.
+- Exchange PAPER and MT5 PAPER start separate R15 sessions at $50 USD each.
 
-EXCHANGE LEG:
-- XAUUSD executes as XAUUSDT on Binance USD-M Futures; BUY and SELL.
-- CRUDE OIL executes as CLUSDT on Aster / Binance Wallet; BUY ONLY. SELL is hard-disabled.
-- Exchange execution uses the maximum leverage allowed by the contract when private leverage-bracket data is available. PAPER reports the leverage source/fallback explicitly.
-- 1% margin per trade. Contract LOT_SIZE / MIN_NOTIONAL rules are respected.
-- Cost gate includes real bid/ask spread, taker fees and slippage allowance. Gross TP must exceed the configured multiple of total round-trip costs.
+SIGNALS R15:
+- Replaces the overly strict all-or-nothing trigger with a visible confluence score.
+- Live context: M1 EMA9/EMA21, RSI14, ATR14 plus 30-second microstructure and taker/tick flow.
+- Default admission threshold: score >= 58.
+- Spread/cost gate remains a hard veto: expected gross target must cover spread + fees + slippage by the configured edge multiple.
+- Dashboard exposes LONG score, SHORT score, threshold, blockers and fulfilled confluences so WAIT is diagnosable.
 
-FOREX / MT5 LEG:
-- MT5 bridge auto-detects the broker's XAU symbol and crude symbol (USOIL/XTIUSD/WTI/CL/etc., with Brent patterns lower priority).
-- Live broker bid/ask and spread are used on every decision.
-- M1 candles plus real broker ticks are used to build 30-second micro-bars.
-- PAPER sizing uses the broker's own margin calculator and broker account leverage; PnL is calculated using MT5 order_calc_profit.
-- REAL orders, when intentionally enabled by APP_MODE/configuration, are sent through MT5 with native SL/TP.
-- CRUDE OIL remains BUY ONLY on MT5 as well.
+CRUDE DIRECTION:
+- Default BUY.
+- User can switch CRUDE OIL to BUY only, SELL only or BOTH from the dashboard.
+- The selected mode applies to CLUSDT/Aster and the broker crude symbol on MT5 simultaneously.
 
-STRATEGY:
-- M1 EMA9/EMA21 + RSI14 + ATR14 context.
-- 30s pullback / displacement / flow trigger.
-- Spread-aware cost gate before entry.
-- Default max holding time 180 seconds.
-- The purpose of R14 is comparative PAPER validation: Exchange vs MT5 spread, leverage, WR, net PnL and holding time.
+PAPER COMPARISON:
+- Exchange R15 PAPER session starts at $50.
+- MT5 R15 PAPER session starts at $50.
+- Historical R14 rows are retained but do not affect the new R15 PAPER balances/statistics.
+- Exchange still uses maximum leverage allowed by the contract when available.
+- MT5 sizing is scaled to the $50 virtual account while respecting broker minimum/step size; broker bid/ask spread is included.
 
-UI R14:
-- Futuristic live candlestick chart with 30s / 1m toggle.
-- Exchange ↔ MT5 venue selector for the same market.
-- Live bid, ask, spread, leverage and current signal diagnostics.
-- Entry BUY/SELL markers, exit markers and active Entry / SL / TP horizontal levels directly on the chart.
-- Comparison cards and table for XAU Exchange, XAU MT5, Crude Exchange and Crude MT5.
+REALTIME CHART:
+- Full candle/history payload refreshes periodically.
+- A dedicated Server-Sent Events stream updates live bid/ask/spread every 500 ms by default.
+- 30s micro-bar is merged into the chart without waiting for the full page refresh.
+- Larger labels, higher contrast, live BUY/SELL/ENTRY/SL/TP markers and a visible stream status.
+
+BACKTEST:
+- In-app Exchange backtest supports 7D / 30D / 90D / MAX.
+- MAX walks paginated 1-minute history backwards up to COMMODITY_BACKTEST_MAX_DAYS (default 365) or until the contract has no older data.
+- Binance klines are paginated with up to 1500 candles per request.
+- Historical result is explicitly labelled HISTORICAL_1M_APPROXIMATION because standard historical 30-second taker-flow candles are not available through the normal kline endpoint.
+- Forward PAPER remains the exact 30s/1m comparison and is shown alongside historical WR, PF, return, DD and final balance.
+
+VENUES:
+- XAU Exchange: XAUUSDT on Binance USD-M Futures.
+- CRUDE Exchange: CLUSDT on Aster / Binance Wallet.
+- MT5 auto-detects XAU and crude symbols and uses live broker bid/ask spread.
 
 SAFE WEB UPDATE:
-- Host-side Quantum Update Agent exposes only status/check/apply over a local Unix socket; Docker socket is NOT mounted into the web application.
-- UI can search and apply newer versions without opening a terminal.
-- Auto-update checks periodically but will not apply while any tracked commodity position is open.
-- The updater refuses a dirty Git working tree and runs Git as the repository owner while privileged deployment is isolated to the update script.
+- Quantum Update Agent remains host-side over a local Unix socket; Docker socket is not mounted into the web app.
+- Updates are blocked while tracked positions are open.
