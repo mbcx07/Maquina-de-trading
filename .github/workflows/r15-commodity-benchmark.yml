@@ -9,12 +9,13 @@ on:
       - 'backend/src/commodityStrategyR15.ts'
       - 'backend/src/r15CommodityBenchmark.ts'
       - 'backend/src/r15XauOptimizer.ts'
+      - 'backend/src/r15XauStrategyLab.ts'
       - '.github/workflows/r15-commodity-benchmark.yml'
 
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: backend
@@ -26,3 +27,4 @@ jobs:
       - run: npm install
       - run: npx tsx src/r15CommodityBenchmark.ts
       - run: npx tsx src/r15XauOptimizer.ts
+      - run: npx tsx src/r15XauStrategyLab.ts
