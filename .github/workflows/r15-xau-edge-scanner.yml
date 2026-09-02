@@ -1,0 +1,25 @@
+name: R15 XAU Edge Scanner
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - 'backend/src/r15XauEdgeScanner.ts'
+      - '.github/workflows/r15-xau-edge-scanner.yml'
+
+jobs:
+  edge-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npx tsx src/r15XauEdgeScanner.ts
