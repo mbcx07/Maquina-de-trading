@@ -1,0 +1,28 @@
+name: XAU Ensemble100 R18 Five Families
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - '.github/workflows/xau-ensemble100-r18-5families.yml'
+
+jobs:
+  ensemble100-five-families:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Require five independent families
+        run: |
+          sed -i 's/const MIN_FAMILIES=3;/const MIN_FAMILIES=5;/' src/xauEnsemble100R18Lab.ts
+          sed -i 's/CONFLUENCE_5_MIN3FAMILIES/CONFLUENCE_5_MIN5FAMILIES/' src/xauEnsemble100R18Lab.ts
+          npx tsx src/xauEnsemble100R18Lab.ts
