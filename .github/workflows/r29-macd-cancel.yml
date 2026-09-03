@@ -1,0 +1,31 @@
+name: R29 MACD cancel lab
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Run 56-day R29 backtest
+        env:
+          R29_DAYS: 56
+          R29_CONCURRENCY: 3
+        run: node --experimental-strip-types src/emaFibLimitR29MacdCancelLab.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r29-trade-audit
+          path: backend/artifacts/r29-trades.json
+          if-no-files-found: warn
