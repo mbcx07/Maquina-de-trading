@@ -28,10 +28,12 @@ def download_day(day: str) -> pd.DataFrame:
     last = None
     for attempt in range(4):
         try:
-            req = urllib.request.Request(url + f"?r32={attempt}", headers={"User-Agent": "r32-lab"})
+            req = urllib.request.Request(url, headers={"User-Agent": "r32-lab"})
             with urllib.request.urlopen(req, timeout=90) as response:
                 raw = response.read()
             with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                if not archive.namelist():
+                    raise ValueError("empty Binance Vision ZIP")
                 member = archive.namelist()[0]
                 frame = pd.read_csv(
                     archive.open(member), header=None, usecols=[1, 2, 5, 6],
