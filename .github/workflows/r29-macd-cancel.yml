@@ -1,4 +1,4 @@
-name: R30 exhaustive timeframe lab
+name: R31 entry and exit optimization lab
 
 on:
   workflow_dispatch:
@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - name: Run 1,500 timeframe combinations over 56 days
+      - name: Run 2,160 entry and exit combinations over 56 days
         env:
           R29_DAYS: 56
           R29_CONCURRENCY: 3
@@ -30,6 +30,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: r30-timeframe-combinations
-          path: backend/artifacts/r30-timeframe-combinations.json
+          name: r31-entry-exit-grid
+          path: backend/artifacts/r31-entry-exit-grid.json
           if-no-files-found: warn
