@@ -1,0 +1,29 @@
+name: R25 Structure Entry Lab
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths:
+      - 'backend/src/scalperR25StructureEntryLab.ts'
+      - '.github/workflows/r25-structure-entry-lab.yml'
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Run structure-entry blind backtest
+        env:
+          R25_CONCURRENCY: '3'
+        run: npx tsx src/scalperR25StructureEntryLab.ts
+      - name: Upload operation audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: r25-structure-entry-trades
+          path: backend/artifacts/r25-trades.json
