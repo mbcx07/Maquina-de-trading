@@ -1,0 +1,29 @@
+name: R28 EMA 30s Fibonacci Limit
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths:
+      - 'backend/src/emaFibLimitR28Lab.ts'
+      - '.github/workflows/r28-ema30s-fib-limit.yml'
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Run corrected 30-second EMA cross backtest
+        env:
+          R28_CONCURRENCY: '3'
+        run: npx tsx src/emaFibLimitR28Lab.ts
+      - name: Upload operation audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: r28-ema30s-fib-limit-trades
+          path: backend/artifacts/r28-trades.json
