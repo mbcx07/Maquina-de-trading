@@ -1757,10 +1757,17 @@ function prepareR27(base: Bar[], entryMin: number, trendMin: number): Prepared {
     close = bars.map((x) => x.close),
     ema8 = emaSeries(close, 8),
     ema14 = emaSeries(close, 14),
-    ema12 = emaSeries(close, 12),
-    ema26 = emaSeries(close, 26),
-    macd = Float64Array.from(close, (_, i) => ema12[i] - ema26[i]),
-    macdSignal = emaSeries(Array.from(macd), 9),
+    macdBars = reaggregate(base, 5 * 60000),
+    macdClose = macdBars.map((x) => x.close),
+    macd12 = emaSeries(macdClose, 12),
+    macd26 = emaSeries(macdClose, 26),
+    macd5m = Float64Array.from(
+      macdClose,
+      (_, i) => macd12[i] - macd26[i],
+    ),
+    macdSignal5m = emaSeries(Array.from(macd5m), 9),
+    macd = new Float64Array(bars.length),
+    macdSignal = new Float64Array(bars.length),
     atrOut = new Float64Array(bars.length),
     avgVolume = new Float64Array(bars.length);
   let trSum = 0,
@@ -1791,9 +1798,19 @@ function prepareR27(base: Bar[], entryMin: number, trendMin: number): Prepared {
       14,
     ),
     trend = new Array<Side | null>(bars.length).fill(null);
-  let h = -1;
+  let h = -1,
+    m = -1;
   for (let i = 0; i < bars.length; i++) {
     const signalClose = bars[i].time + entryMin * 60000;
+    while (
+      m + 1 < macdBars.length &&
+      macdBars[m + 1].time + 5 * 60000 <= signalClose
+    )
+      m++;
+    if (m >= 0) {
+      macd[i] = macd5m[m];
+      macdSignal[i] = macdSignal5m[m];
+    }
     while (
       h + 1 < higher.length &&
       higher[h + 1].time + trendMin * 60000 <= signalClose
@@ -2292,7 +2309,13 @@ async function mainR29() {
         "HIGHER_TF_TREND_CHANGE",
         "PERIOD_END",
       ],
-      macd: { fast: 12, slow: 26, signal: 9, timeframe: "30s" },
+      macd: {
+        fast: 12,
+        slow: 26,
+        signal: 9,
+        timeframe: "5m",
+        closedCandlesOnly: true,
+      },
       structureTimeframesTested: ["1m", "3m", "5m"],
       trendTimeframesTested: ["5m", "15m", "1h"],
       volumeTimeframe: "30s",
