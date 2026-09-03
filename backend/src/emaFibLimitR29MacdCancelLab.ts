@@ -1930,40 +1930,6 @@ function runR27(
         continue;
       }
     }
-    if (pending && !pos) {
-      const macdDown =
-          p.macd[i] < p.macdSignal[i] && p.macd[i - 1] >= p.macdSignal[i - 1],
-        macdUp =
-          p.macd[i] > p.macdSignal[i] && p.macd[i - 1] <= p.macdSignal[i - 1],
-        invalid =
-          (pending.side === "BUY" && macdDown) ||
-          (pending.side === "SELL" && macdUp);
-      if (invalid) pending = null;
-      else {
-        const filled =
-          pending.side === "BUY"
-            ? b[i].low <= pending.limit
-            : b[i].high >= pending.limit;
-        if (filled) {
-          pos = {
-            side: pending.side,
-            entry: pending.limit,
-            sl: pending.sl,
-            tp: pending.tp,
-            fill: i,
-            low: pending.low,
-            high: pending.high,
-          };
-          pending = null;
-          const hitStop =
-            pos.side === "BUY" ? b[i].low <= pos.sl : b[i].high >= pos.sl;
-          if (hitStop) {
-            closeTrade(i, pos.sl, "SL_SAME_BAR");
-            continue;
-          }
-        }
-      }
-    }
     if (
       !pos &&
       !pending &&
@@ -1985,14 +1951,20 @@ function runR27(
         const range = high - low,
           a = p.atr[i];
         if (range > a * 0.5) {
-          const limit =
-              side === "BUY" ? high - range * cfg.fib : low + range * cfg.fib,
-            sl =
+          const sl =
               side === "BUY"
                 ? low - a * cfg.atrBuffer
                 : high + a * cfg.atrBuffer,
             tp = side === "BUY" ? Infinity : 0;
-          pending = { side, limit, sl, tp, placed: i, low, high };
+          pos = {
+            side,
+            entry: b[i + 1].open,
+            sl,
+            tp,
+            fill: i + 1,
+            low,
+            high,
+          };
         }
       }
     }
@@ -2313,27 +2285,21 @@ async function mainR29() {
       symbol: SYMBOL,
       days: DAYS,
       architecture:
-        "EMA_8_14_CROSS_30S_FIB_LIMIT_MACD_SIGNAL_CANCELLATION_HIGHER_TF_TREND_VOLUME",
+        "EMA_8_14_CROSS_30S_MARKET_ENTRY_EMA150_HIGHER_TF_TREND_VOLUME",
+      entryExecution: "MARKET_AT_NEXT_30S_OPEN",
       emaCrossTimeframe: "30s",
       ema150Filter: {
         timeframe: "30s",
         buy: "CLOSE_ABOVE_EMA150",
         sell: "CLOSE_BELOW_EMA150",
       },
-      pendingCancellation: "OPPOSITE_MACD_LINE_SIGNAL_CROSS_ONLY",
       positionExit: [
         "SL",
         "OPPOSITE_EMA_8_14_CROSS",
         "HIGHER_TF_TREND_CHANGE",
         "PERIOD_END",
       ],
-      macd: {
-        fast: 12,
-        slow: 26,
-        signal: 9,
-        timeframe: "5m",
-        closedCandlesOnly: true,
-      },
+      macd: "NOT_USED_WITH_MARKET_ENTRY",
       structureTimeframesTested: ["1m", "3m", "5m"],
       trendTimeframesTested: ["5m", "15m", "1h"],
       volumeTimeframe: "30s",
