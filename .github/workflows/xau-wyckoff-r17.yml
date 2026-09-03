@@ -1,0 +1,26 @@
+name: XAU Wyckoff R17 Lab
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - 'backend/src/xauWyckoffOrderFlowLabR17.ts'
+      - '.github/workflows/xau-wyckoff-r17.yml'
+
+jobs:
+  wyckoff-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Run Wyckoff price-volume-orderflow blind backtest
+        run: npx tsx src/xauWyckoffOrderFlowLabR17.ts
