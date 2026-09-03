@@ -1,4 +1,4 @@
-name: R29 MACD cancel lab
+name: R30 exhaustive timeframe lab
 
 on:
   workflow_dispatch:
@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - name: Run 56-day R29 backtest
+      - name: Run 1,500 timeframe combinations over 56 days
         env:
           R29_DAYS: 56
           R29_CONCURRENCY: 3
@@ -30,6 +30,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: r29-trade-audit
-          path: backend/artifacts/r29-trades.json
+          name: r30-timeframe-combinations
+          path: backend/artifacts/r30-timeframe-combinations.json
           if-no-files-found: warn

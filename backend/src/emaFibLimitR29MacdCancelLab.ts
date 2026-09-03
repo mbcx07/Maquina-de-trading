@@ -1726,6 +1726,7 @@ type Prepared = {
   macdSignal: Float64Array;
   atr: Float64Array;
   avgVolume: Float64Array;
+  filterVolume: Float64Array;
   trend: Array<Side | null>;
 };
 type R27Trade = {
@@ -1771,7 +1772,8 @@ function prepareR27(base: Bar[], entryMin: number, trendMin: number): Prepared {
     macd = new Float64Array(bars.length),
     macdSignal = new Float64Array(bars.length),
     atrOut = new Float64Array(bars.length),
-    avgVolume = new Float64Array(bars.length);
+    avgVolume = new Float64Array(bars.length),
+    filterVolume = Float64Array.from(bars, (x) => x.volume);
   let trSum = 0,
     volSum = 0;
   const trs = new Float64Array(bars.length);
@@ -1830,6 +1832,7 @@ function prepareR27(base: Bar[], entryMin: number, trendMin: number): Prepared {
     macdSignal,
     atr: atrOut,
     avgVolume,
+    filterVolume,
     trend,
   };
 }
@@ -1935,7 +1938,7 @@ function runR27(
       !pending &&
       i < end - 1 &&
       p.avgVolume[i] > 0 &&
-      b[i].volume >= p.avgVolume[i] * cfg.volumeMult
+      p.filterVolume[i] >= p.avgVolume[i] * cfg.volumeMult
     ) {
       let side: Side | null = null;
       if (crossUp && bias === "BUY" && b[i].close > p.ema150[i]) side = "BUY";
@@ -2321,7 +2324,220 @@ async function mainR29() {
   );
 }
 
-mainR29().catch((e) => {
+type R30Cfg = R28Cfg & { ema150Min: number; volumeMin: number };
+
+function mapClosedSeries(
+  signalBars: Bar[],
+  signalMin: number,
+  sourceBars: Bar[],
+  sourceMin: number,
+  values: Float64Array,
+) {
+  const out = new Float64Array(signalBars.length);
+  let j = -1;
+  for (let i = 0; i < signalBars.length; i++) {
+    const knownAt = signalBars[i].time + signalMin * 60000;
+    while (
+      j + 1 < sourceBars.length &&
+      sourceBars[j + 1].time + sourceMin * 60000 <= knownAt
+    )
+      j++;
+    if (j >= 0) out[i] = values[j];
+  }
+  return out;
+}
+
+function prepareR30(
+  base: Bar[],
+  entryMin: number,
+  trendMin: number,
+  ema150Min: number,
+  volumeMin: number,
+) {
+  const p = prepareR27(base, entryMin, trendMin);
+  const emaBars = reaggregate(base, ema150Min * 60000);
+  const emaValues = emaSeries(
+    emaBars.map((x) => x.close),
+    150,
+  );
+  p.ema150 = mapClosedSeries(
+    p.bars,
+    entryMin,
+    emaBars,
+    ema150Min,
+    emaValues,
+  );
+
+  const volumeBars = reaggregate(base, volumeMin * 60000);
+  const currentVolume = Float64Array.from(volumeBars, (x) => x.volume);
+  const averageVolume = new Float64Array(volumeBars.length);
+  let sum = 0;
+  for (let i = 0; i < volumeBars.length; i++) {
+    averageVolume[i] = i ? sum / Math.min(i, 20) : 0;
+    sum += volumeBars[i].volume;
+    if (i >= 20) sum -= volumeBars[i - 20].volume;
+  }
+  p.filterVolume = mapClosedSeries(
+    p.bars,
+    entryMin,
+    volumeBars,
+    volumeMin,
+    currentVolume,
+  );
+  p.avgVolume = mapClosedSeries(
+    p.bars,
+    entryMin,
+    volumeBars,
+    volumeMin,
+    averageVolume,
+  );
+  return p;
+}
+
+async function mainR30() {
+  const end = Math.floor((Date.now() - 2 * DAY) / DAY) * DAY;
+  const start = end - DAYS * DAY;
+  const dates: string[] = [];
+  for (let t = start; t < end; t += DAY)
+    dates.push(new Date(t).toISOString().slice(0, 10));
+  const daily = await mapLimit(dates, DOWNLOAD_CONCURRENCY, async (d) => {
+    const x = await fetchDay(d);
+    console.log("DAY", d, x.length);
+    return x;
+  });
+  const base = daily.flat().sort((a, b) => a.time - b.time);
+  const entryFrames = [0.5, 1, 3, 5];
+  const ema150Frames = [0.5, 1, 3, 5, 15];
+  const volumeFrames = [0.5, 1, 3, 5, 15];
+  const structureFrames = [1, 3, 5, 15];
+  const trendFrames = [5, 15, 60, 240];
+  const rows: Array<{
+    cfg: R30Cfg;
+    train: Stats;
+    validation: Stats;
+    score: number;
+    qualified: boolean;
+  }> = [];
+  let prepared = 0;
+  for (const entryMin of entryFrames)
+    for (const trendMin of trendFrames) {
+      if (trendMin <= entryMin) continue;
+      for (const ema150Min of ema150Frames)
+        for (const volumeMin of volumeFrames) {
+          const p = prepareR30(
+            base,
+            entryMin,
+            trendMin,
+            ema150Min,
+            volumeMin,
+          );
+          const t1 = Math.floor(p.bars.length * 0.5);
+          const t2 = Math.floor(p.bars.length * 0.75);
+          for (const structureMin of structureFrames) {
+            const structureBars = 10;
+            const cfg: R30Cfg = {
+              entryMin,
+              trendMin,
+              ema150Min,
+              volumeMin,
+              structureMin,
+              structureBars,
+              fib: 0,
+              volumeMult: 1.2,
+              swingLookback: Math.max(
+                2,
+                Math.round((structureMin / entryMin) * structureBars),
+              ),
+              expiryBars: 0,
+              extension: 0,
+              atrBuffer: 0.1,
+              minNetRr: 0,
+            };
+            const train = runR27(p, cfg, 0, t1).stats;
+            const validation = runR27(p, cfg, t1, t2).stats;
+            const qualified = passR27(train) && passR27(validation);
+            rows.push({
+              cfg,
+              train,
+              validation,
+              qualified,
+              score:
+                scoreR27(train) +
+                scoreR27(validation) * 1.5 +
+                (qualified ? 10000 : 0),
+            });
+          }
+          prepared++;
+          if (prepared % 25 === 0)
+            console.log("R30_PROGRESS", prepared, rows.length);
+        }
+    }
+  rows.sort((a, b) => b.score - a.score);
+  const frequencyEligible = rows.filter(
+    (x) => x.train.tradesPerDay >= 10 && x.validation.tradesPerDay >= 10,
+  );
+  const best = frequencyEligible[0] ?? rows[0];
+  const p = prepareR30(
+    base,
+    best.cfg.entryMin,
+    best.cfg.trendMin,
+    best.cfg.ema150Min,
+    best.cfg.volumeMin,
+  );
+  const t2 = Math.floor(p.bars.length * 0.75);
+  const blind = runR27(p, best.cfg, t2, p.bars.length, true);
+  const survived = best.qualified && passR27(blind.stats);
+  await mkdir("artifacts", { recursive: true });
+  await writeFile(
+    "artifacts/r30-timeframe-combinations.json",
+    JSON.stringify(
+      {
+        testedConfigurations: rows.length,
+        config: best.cfg,
+        summary: blind.stats,
+        trades: blind.trades,
+        top20: rows.slice(0, 20),
+      },
+      null,
+      2,
+    ),
+  );
+  console.log("R30_TOP10", JSON.stringify(rows.slice(0, 10)));
+  console.log(
+    "R30_RESULT",
+    JSON.stringify({
+      symbol: SYMBOL,
+      days: DAYS,
+      selection: "TRAIN_AND_VALIDATION_ONLY_BLIND_TEST",
+      entryExecution: "MARKET_AT_NEXT_SIGNAL_BAR_OPEN",
+      framesTested: {
+        emaCross: entryFrames,
+        ema150: ema150Frames,
+        volume: volumeFrames,
+        structure: structureFrames,
+        higherTrend: trendFrames,
+      },
+      fixed: { volumeMultiplier: 1.2, structureBars: 10, atrBuffer: 0.1 },
+      testedConfigurations: rows.length,
+      frequencyEligibleConfigurations: frequencyEligible.length,
+      requirements: {
+        winRateMin: 65,
+        tradesPerDayMin: 10,
+        pfMin: 1.2,
+        testTradesMin: 120,
+      },
+      config: best.cfg,
+      train: best.train,
+      validation: best.validation,
+      test: blind.stats,
+      qualifiedConfigurations: rows.filter((x) => x.qualified).length,
+      survived,
+      auditFile: "artifacts/r30-timeframe-combinations.json",
+    }),
+  );
+}
+
+mainR30().catch((e) => {
   console.error(e);
   process.exitCode = 1;
 });
