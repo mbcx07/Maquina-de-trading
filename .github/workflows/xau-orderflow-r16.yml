@@ -1,0 +1,26 @@
+name: XAU OrderFlow R16 Lab
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - 'backend/src/xauOrderFlowLabR16.ts'
+      - '.github/workflows/xau-orderflow-r16.yml'
+
+jobs:
+  orderflow-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Run 30s aggTrade order-flow blind backtest
+        run: npx tsx src/xauOrderFlowLabR16.ts
