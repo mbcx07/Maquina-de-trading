@@ -5,6 +5,7 @@ import { AsterV3Client } from './aster.js';
 import { BinanceUsdmClient } from './binance.js';
 import { CommodityBacktestR15 } from './commodityBacktestR15.js';
 import type { CommodityKindR15, CrudeSideModeR15 } from './commodityStrategyR15.js';
+import { ConsensusScalperR18 } from './consensusScalperR18.js';
 import { defaultSettings, env } from './config.js';
 import { TradingDatabase } from './database.js';
 import { ExchangeCommodityScalperR15 } from './exchangeCommodityScalperR15.js';
@@ -16,8 +17,8 @@ import { TelegramService } from './telegram.js';
 import type { EngineSettings } from './types.js';
 import { XauTsmomPaperService } from './xauTsmomPaper.js';
 
-const RELEASE = 'R15.1';
-const EDITION = 'XAU_TSMOM_ROBUST_PAPER_PLUS_DUAL_MARKET_OBSERVATION';
+const RELEASE = 'R18';
+const EDITION = 'CONSENSUS_100_STRATEGIES_30S_PAPER';
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
@@ -65,16 +66,19 @@ function setCrudeSideMode(value: CrudeSideModeR15): void {
   database.db.prepare(`INSERT INTO engine_state(key,value,updated_at) VALUES('r15CrudeSideMode',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`).run(value, Date.now());
 }
 
-// Legacy 30s/1m scalpers remain available for chart/data/backtest only. They are
-// deliberately disabled for automatic entries after failing historical validation.
+// Data providers only. Their rejected R15 signal engines stay disabled.
 const exchange = new ExchangeCommodityScalperR15(database, binance, aster, telegram, () => getSettings().appMode, getCrudeSideMode);
 const forex = new Mt5CommodityScalperR15(database, mt5, telegram, () => getSettings().appMode, getCrudeSideMode);
 exchange.setEnabled(false);
 forex.setEnabled(false);
 
+// Previously validated slow model remains visible for comparison, not automatic in R18.
 const xauTsmom = new XauTsmomPaperService(database);
+xauTsmom.stop();
+
+const consensus = new ConsensusScalperR18(database, exchange, forex, telegram, getCrudeSideMode);
 const backtest = new CommodityBacktestR15(aster);
-if (getSettings().engineEnabled) xauTsmom.start();
+if (getSettings().engineEnabled) consensus.start();
 
 app.use('/api/integrations', createIntegrationRouter(vault, getSettings, () => workspaceId));
 
@@ -90,17 +94,19 @@ const backtestSchema = z.object({
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    service: 'Quantum Commodities Dual R15.1',
+    service: 'Quantum Commodities Consensus R18',
     release: RELEASE,
     edition: EDITION,
     mode: 'PAPER',
     engineEnabled: getSettings().engineEnabled,
-    validatedAutomaticModel: 'XAU_TSMOM_16H_ROBUST_R15',
-    rejectedAutomaticModel: '30S_1M_SCALPER',
-    paperInitialBalance: 50,
-    xauLeverage: 10,
+    automaticModel: 'R18_CONSENSUS_100_30S',
+    strategyCount: 100,
+    minAgreement: 5,
+    minFamilies: 3,
+    paperInitialBalancePerVenue: 50,
     crudeSideMode: getCrudeSideMode(),
     streamIntervalMs: env.COMMODITY_STREAM_MS,
+    realExecutionLocked: true,
   });
 });
 
@@ -118,36 +124,34 @@ app.get('/api/state', (_req, res) => {
       mode: 'PAPER',
       engineEnabled: settings.engineEnabled,
       crudeSideMode: getCrudeSideMode(),
-      validation: {
-        status: 'ROBUST_PASS',
+      consensusPolicy: {
+        model: 'R18_CONSENSUS_100_30S',
+        strategies: 100,
+        families: 10,
+        variantsPerFamily: 10,
+        minVotesSameDirection: 5,
+        minDistinctFamilies: 3,
+        minVoteLead: 2,
+        timeframe: '30s',
+        entry: 'dominant BUY/SELL vote + spread/cost veto',
+        paperOnly: true,
+        marginPctPerTrade: 1,
+        maxOneOpenPerVenueMarket: true,
+      },
+      strategyFamilies: ['EMA_TREND','MOMENTUM','BREAKOUT','PULLBACK','RSI','BOLLINGER','VWAP','FLOW','VOLUME_EXPANSION','CANDLE_STRUCTURE'],
+      referenceModel: {
+        status: 'REFERENCE_ONLY',
         model: 'XAU_TSMOM_16H_ROBUST_R15',
         historicalTrades: 94,
         historicalWinRate: 54.26,
         historicalProfitFactor: 1.336,
-        historicalReturnPct: 1.584,
-        historicalMaxDrawdownPct: 0.867,
-        blindTestTrades: 19,
-        blindTestWinRate: 42.11,
-        blindTestProfitFactor: 1.173,
-        blindTestReturnPct: 0.154,
-        stressCost15xReturnPct: 0.846,
-        stressCost20xReturnPct: 0.114,
-        sensitivityBlindPositivePct: 55.56,
-        monteCarloLossProbabilityPct: 14.42,
-      },
-      policy: {
-        autoTrading: { XAU_EXCHANGE: 'PAPER_TSMOM_VALIDATED', XAU_MT5: 'OBSERVE_ONLY', CRUDE_EXCHANGE: 'OBSERVE_ONLY', CRUDE_MT5: 'OBSERVE_ONLY' },
-        xauTsmom: { timeframe: '15m signal + 4h regime', lookbackHours: 16, momentumThresholdPct: 1, holdHours: 16, marginPct: 1, leverage: 10, initialBalance: 50 },
-        legacyScalper: 'DISABLED_AFTER_FAILED_240D_EDGE_SCAN',
-        crudeSideMode: getCrudeSideMode(),
-        backtest: { maxDays: env.COMMODITY_BACKTEST_MAX_DAYS, legacyModel: 'HISTORICAL_1M_APPROXIMATION', forwardTsmom: 'LIVE_15M_4H_PAPER' },
       },
       integrations: {
         binance: { configured: binance.hasCredentials(), connected: binanceStatus?.lastTestOk === true, masked: binanceStatus?.maskedPrimary, lastError: binanceStatus?.lastError },
         aster: { configured: aster.hasCredentials(), label: 'Aster / Binance Wallet for CLUSDT' },
         mt5: { configured: Boolean(vault.getMt5(workspaceId)?.bridgeUrl || env.MT5_BRIDGE_URL), connected: mt5Status?.lastTestOk === true, masked: mt5Status?.maskedPrimary, lastError: mt5Status?.lastError },
       },
-      xauTsmom: xauTsmom.getState(),
+      consensus: consensus.getState(),
       observation: { exchange: exchange.getState(), forex: forex.getState() },
       backtest: { XAU: backtest.getState('XAU'), CRUDE: backtest.getState('CRUDE') },
     });
@@ -198,38 +202,41 @@ app.patch('/api/settings', (req, res) => {
     const next: EngineSettings = { ...current, appMode: 'PAPER', engineEnabled: patch.engineEnabled ?? current.engineEnabled, cryptoEnabled: false, forexEnabled: true, forexExecutionMode: 'SIGNAL_ONLY' };
     database.saveSettings(next);
     if (patch.crudeSideMode) setCrudeSideMode(patch.crudeSideMode);
-    if (next.engineEnabled) xauTsmom.start(); else xauTsmom.stop();
-    exchange.setEnabled(false); forex.setEnabled(false);
-    res.json({ ok: true, settings: next, crudeSideMode: getCrudeSideMode() });
+    if (next.engineEnabled) consensus.start(); else consensus.stop();
+    exchange.setEnabled(false); forex.setEnabled(false); xauTsmom.stop();
+    res.json({ ok: true, settings: next, crudeSideMode: getCrudeSideMode(), consensus: consensus.getState() });
   } catch (error) { res.status(400).json({ ok: false, error: message(error) }); }
 });
 
 app.post('/api/start', async (_req, res) => {
   const current = getSettings();
   database.saveSettings({ ...current, appMode: 'PAPER', engineEnabled: true, cryptoEnabled: false, forexEnabled: true, forexExecutionMode: 'SIGNAL_ONLY' });
-  exchange.setEnabled(false); forex.setEnabled(false); xauTsmom.start();
-  await xauTsmom.runOnce();
-  res.json({ ok: true, engineEnabled: true, model: 'XAU_TSMOM_16H_ROBUST_R15', state: xauTsmom.getState() });
+  exchange.setEnabled(false); forex.setEnabled(false); xauTsmom.stop(); consensus.start();
+  await consensus.runOnce();
+  res.json({ ok: true, engineEnabled: true, model: 'R18_CONSENSUS_100_30S', state: consensus.getState() });
 });
 
 app.post('/api/pause', (_req, res) => {
   const current = getSettings();
   database.saveSettings({ ...current, appMode: 'PAPER', engineEnabled: false, cryptoEnabled: false, forexEnabled: true, forexExecutionMode: 'SIGNAL_ONLY' });
-  xauTsmom.stop(); exchange.setEnabled(false); forex.setEnabled(false);
+  consensus.stop(); xauTsmom.stop(); exchange.setEnabled(false); forex.setEnabled(false);
   res.json({ ok: true, engineEnabled: false });
 });
 
 app.post('/api/run', async (_req, res) => {
-  await xauTsmom.runOnce();
-  res.json({ ok: true, model: 'XAU_TSMOM_16H_ROBUST_R15', state: xauTsmom.getState() });
+  if (!consensus.isEnabled()) consensus.start();
+  await consensus.runOnce();
+  res.json({ ok: true, model: 'R18_CONSENSUS_100_30S', state: consensus.getState() });
 });
+
+app.get('/api/consensus/trades', (_req, res) => res.json({ ok:true, summary:consensus.summary(), recent:consensus.recent(300) }));
 
 app.post('/api/backtest/start', (req, res) => {
   try {
     const input = backtestSchema.parse(req.body);
     const kind = input.kind as CommodityKindR15;
-    const started = backtest.run({ kind, days: input.days, crudeSideMode: getCrudeSideMode(), assumedSpreadPct: kind === 'XAU' ? 0.025 : env.COMMODITY_MAX_SPREAD_PCT_CL * 0.5, leverage: kind === 'XAU' ? 10 : 20 });
-    res.status(202).json({ ok: true, backtest: started });
+    const started = backtest.run({ kind, days: input.days, crudeSideMode: getCrudeSideMode(), assumedSpreadPct: kind === 'XAU' ? 0.025 : env.COMMODITY_MAX_SPREAD_PCT_CL * 0.5, leverage: kind === 'XAU' ? 10 : 10 });
+    res.status(202).json({ ok: true, backtest: started, note:'Legacy R15 approximation. R18 consensus uses dedicated historical lab.' });
   } catch (error) { res.status(400).json({ ok: false, error: message(error) }); }
 });
 app.get('/api/backtest/:kind', (req, res) => {
@@ -239,7 +246,7 @@ app.get('/api/backtest/:kind', (req, res) => {
 });
 
 app.get('/api/trades', (_req, res) => {
-  res.json({ ok: true, xauTsmom: xauTsmom.getState(), paper: xauTsmom.summary(), recent: xauTsmom.recent(200) });
+  res.json({ ok: true, model:'R18_CONSENSUS_100_30S', consensus:consensus.getState(), paper:consensus.summary(), recent:consensus.recent(300) });
 });
 
 app.get('/api/mt5/test', async (_req, res) => {
@@ -251,9 +258,9 @@ app.get('/api/aster/test-public', async (_req, res) => {
 });
 
 app.listen(env.PORT, '0.0.0.0', () => {
-  console.log(`[R15.1] listening on 0.0.0.0:${env.PORT}`);
-  console.log('[R15.1] AUTO=PAPER XAU TSMOM 15m/4h; legacy scalpers disabled; crude/MT5 observe-only');
-  if (getSettings().engineEnabled) xauTsmom.start();
+  console.log(`[R18] listening on 0.0.0.0:${env.PORT}`);
+  console.log('[R18] PAPER 100 strategies @30s; entry requires >=5 same-side votes from >=3 families');
+  if (getSettings().engineEnabled) consensus.start();
 });
 
 function parseKind(value: unknown): CommodityKindR15 | null {
