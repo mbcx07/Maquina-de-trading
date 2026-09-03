@@ -1,0 +1,29 @@
+name: R24 Structural TP SL Lab
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths:
+      - 'backend/src/scalperR24StructuralLab.ts'
+      - '.github/workflows/r24-structural-lab.yml'
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Run lookahead-free structural backtest
+        env:
+          R24_CONCURRENCY: '3'
+        run: npx tsx src/scalperR24StructuralLab.ts
+      - name: Upload operation audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: r24-structural-trades
+          path: backend/artifacts/r24-trades.json
