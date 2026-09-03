@@ -2,6 +2,12 @@ name: R29 MACD cancel lab
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - backend/src/emaFibLimitR29MacdCancelLab.ts
+      - .github/workflows/r29-macd-cancel.yml
 
 jobs:
   backtest:
