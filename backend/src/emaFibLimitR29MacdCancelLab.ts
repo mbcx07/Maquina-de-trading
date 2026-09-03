@@ -1721,6 +1721,7 @@ type Prepared = {
   bars: Bar[];
   ema8: Float64Array;
   ema14: Float64Array;
+  ema150: Float64Array;
   macd: Float64Array;
   macdSignal: Float64Array;
   atr: Float64Array;
@@ -1757,6 +1758,7 @@ function prepareR27(base: Bar[], entryMin: number, trendMin: number): Prepared {
     close = bars.map((x) => x.close),
     ema8 = emaSeries(close, 8),
     ema14 = emaSeries(close, 14),
+    ema150 = emaSeries(close, 150),
     macdBars = reaggregate(base, 5 * 60000),
     macdClose = macdBars.map((x) => x.close),
     macd12 = emaSeries(macdClose, 12),
@@ -1819,7 +1821,17 @@ function prepareR27(base: Bar[], entryMin: number, trendMin: number): Prepared {
     if (h >= 14)
       trend[i] = h8[h] > h14[h] ? "BUY" : h8[h] < h14[h] ? "SELL" : null;
   }
-  return { bars, ema8, ema14, macd, macdSignal, atr: atrOut, avgVolume, trend };
+  return {
+    bars,
+    ema8,
+    ema14,
+    ema150,
+    macd,
+    macdSignal,
+    atr: atrOut,
+    avgVolume,
+    trend,
+  };
 }
 function runR27(
   p: Prepared,
@@ -1960,8 +1972,9 @@ function runR27(
       b[i].volume >= p.avgVolume[i] * cfg.volumeMult
     ) {
       let side: Side | null = null;
-      if (crossUp && bias === "BUY") side = "BUY";
-      else if (crossDown && bias === "SELL") side = "SELL";
+      if (crossUp && bias === "BUY" && b[i].close > p.ema150[i]) side = "BUY";
+      else if (crossDown && bias === "SELL" && b[i].close < p.ema150[i])
+        side = "SELL";
       if (side) {
         let low = Infinity,
           high = -Infinity;
@@ -2302,6 +2315,11 @@ async function mainR29() {
       architecture:
         "EMA_8_14_CROSS_30S_FIB_LIMIT_MACD_SIGNAL_CANCELLATION_HIGHER_TF_TREND_VOLUME",
       emaCrossTimeframe: "30s",
+      ema150Filter: {
+        timeframe: "30s",
+        buy: "CLOSE_ABOVE_EMA150",
+        sell: "CLOSE_BELOW_EMA150",
+      },
       pendingCancellation: "OPPOSITE_MACD_LINE_SIGNAL_CROSS_ONLY",
       positionExit: [
         "SL",
