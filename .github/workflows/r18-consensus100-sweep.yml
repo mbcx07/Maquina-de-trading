@@ -1,0 +1,26 @@
+name: R18 Consensus100 Threshold Sweep
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - 'backend/src/consensus100SweepR18.ts'
+      - '.github/workflows/r18-consensus100-sweep.yml'
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Sweep vote and family thresholds
+        run: npx tsx src/consensus100SweepR18.ts
