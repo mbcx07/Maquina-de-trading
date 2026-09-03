@@ -20,5 +20,5 @@ jobs:
       - run: npm install
       - name: Run R23 blind winrate laboratory
         env:
-          R23_CONCURRENCY: '6'
+          R23_CONCURRENCY: '3'
         run: npx tsx src/scalperR23WinrateLab.ts
