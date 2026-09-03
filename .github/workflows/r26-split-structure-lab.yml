@@ -1,0 +1,29 @@
+name: R26 Split Structure Lab
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths:
+      - 'backend/src/scalperR26SplitStructureLab.ts'
+      - '.github/workflows/r26-split-structure-lab.yml'
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Run split-structure blind backtest
+        env:
+          R26_CONCURRENCY: '3'
+        run: npx tsx src/scalperR26SplitStructureLab.ts
+      - name: Upload operation audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: r26-split-structure-trades
+          path: backend/artifacts/r26-trades.json
