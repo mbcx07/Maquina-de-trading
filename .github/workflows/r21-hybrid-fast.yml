@@ -1,0 +1,30 @@
+name: R21 Hybrid Fast
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths:
+      - '.github/workflows/r21-hybrid-fast.yml'
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Focus R21 grid around robust TSMOM and best R20 zone
+        run: |
+          cp src/hybridTsmomConsensusR21Lab.ts /tmp/r21.ts
+          sed -i "s/DAYS=56/DAYS=42/" /tmp/r21.ts
+          sed -i "s/for(const holdMin of \[30,60,120\])/for(const holdMin of [60,120])/" /tmp/r21.ts
+          sed -i "s/for(const minVotes of \[5,10,15,20\])/for(const minVotes of [10,20])/" /tmp/r21.ts
+          sed -i "s/for(const minFamilies of \[3,4,5\])/for(const minFamilies of [4,5])/" /tmp/r21.ts
+          sed -i "s/for(const lead of \[1.1,1.2,1.35\])/for(const lead of [1.1,1.2])/" /tmp/r21.ts
+          sed -i "s/for(const mom16Threshold of \[.6,.8,1.0,1.2\])/for(const mom16Threshold of [.8,1.0])/" /tmp/r21.ts
+          sed -i "s/for(const atrFloorPct of \[.08,.12,.16\])/for(const atrFloorPct of [.08,.12])/" /tmp/r21.ts
+          npx tsx /tmp/r21.ts
