@@ -1,0 +1,22 @@
+name: R19 Adaptive Fast
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths:
+      - 'backend/src/adaptiveEnsemble100R19Fast.ts'
+      - '.github/workflows/r19-adaptive-fast.yml'
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npx tsx src/adaptiveEnsemble100R19Fast.ts
