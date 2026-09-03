@@ -1,0 +1,33 @@
+name: R32 causal signal research
+
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths:
+      - backend/labs/r32_ml_research.py
+      - .github/workflows/r32-ml-research.yml
+  workflow_dispatch:
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy pandas scikit-learn
+      - name: Run causal train-validation-blind research
+        env:
+          R32_DAYS: "56"
+        run: python labs/r32_ml_research.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r32-ml-research
+          path: backend/artifacts/r32-ml-research.json
+          if-no-files-found: warn
