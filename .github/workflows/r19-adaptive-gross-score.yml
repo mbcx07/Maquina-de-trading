@@ -1,0 +1,26 @@
+name: R19 Adaptive Gross Score
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths:
+      - '.github/workflows/r19-adaptive-gross-score.yml'
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Score strategy members gross; costs only at executed ensemble trade
+        run: |
+          sed -i "s/const net=(v.side==='BUY'?rr:-rr)-COST/const net=(v.side==='BUY'?rr:-rr)/" src/adaptiveEnsemble100R19Fast.ts
+          sed -i "s/s.edge\/COST/s.edge\/.03/" src/adaptiveEnsemble100R19Fast.ts
+          sed -i "s/lead:1.35/lead:1.20/g" src/adaptiveEnsemble100R19Fast.ts
+          npx tsx src/adaptiveEnsemble100R19Fast.ts
