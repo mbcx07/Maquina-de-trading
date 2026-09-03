@@ -8,7 +8,7 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: backend
@@ -17,5 +17,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
-      - run: npx tsx src/scalperTsmomR22Lab.ts
+      - run: npm ci
+      - name: Run incremental R22 laboratory
+        env:
+          R22_CONCURRENCY: '6'
+        run: npx tsx src/scalperTsmomR22Lab.ts
