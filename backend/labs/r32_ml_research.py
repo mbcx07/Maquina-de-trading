@@ -20,11 +20,11 @@ DAYS = int(os.getenv("R32_DAYS", "56"))
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / "artifacts"
 ARTIFACTS.mkdir(exist_ok=True)
-CACHE = ARTIFACTS / f"r32-bars-{DAYS}d.pkl"
+CACHE = ARTIFACTS / f"r32-klines-1m-{DAYS}d.pkl"
 
 
 def download_day(day: str) -> pd.DataFrame:
-    url = f"https://data.binance.vision/data/futures/um/daily/aggTrades/{SYMBOL}/{SYMBOL}-aggTrades-{day}.zip"
+    url = f"https://data.binance.vision/data/futures/um/daily/klines/{SYMBOL}/1m/{SYMBOL}-1m-{day}.zip"
     last = None
     for attempt in range(4):
         try:
@@ -36,24 +36,22 @@ def download_day(day: str) -> pd.DataFrame:
                     raise ValueError("empty Binance Vision ZIP")
                 member = archive.namelist()[0]
                 frame = pd.read_csv(
-                    archive.open(member), header=None, usecols=[1, 2, 5, 6],
-                    names=["price", "qty", "time", "maker"],
+                    archive.open(member), header=None, usecols=[0,1,2,3,4,5,9],
+                    names=["time","open","high","low","close","volume","buy_volume"],
                 )
-            for column in ["price", "qty", "time"]:
+            for column in ["time","open","high","low","close","volume","buy_volume"]:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
-            frame = frame.dropna(subset=["price", "qty", "time"])
+            frame = frame.dropna(subset=["time","open","high","low","close","volume","buy_volume"])
             timestamp = frame["time"].astype("int64")
             timestamp = np.where(timestamp > 10**17, timestamp // 10**6,
                         np.where(timestamp > 10**14, timestamp // 10**3, timestamp))
             frame["time"] = pd.to_datetime(timestamp, unit="ms", utc=True)
-            frame["bucket"] = frame["time"].dt.floor("30s")
-            maker = frame["maker"].astype(str).str.lower().eq("true")
-            frame["buy_volume"] = np.where(~maker, frame["qty"], 0.0)
-            frame["sell_volume"] = np.where(maker, frame["qty"], 0.0)
+            frame["bucket"] = frame["time"].dt.floor("1min")
+            frame["sell_volume"] = (frame["volume"]-frame["buy_volume"]).clip(lower=0)
             out = frame.groupby("bucket", sort=True).agg(
-                open=("price", "first"), high=("price", "max"),
-                low=("price", "min"), close=("price", "last"),
-                volume=("qty", "sum"), buy_volume=("buy_volume", "sum"),
+                open=("open", "first"), high=("high", "max"),
+                low=("low", "min"), close=("close", "last"),
+                volume=("volume", "sum"), buy_volume=("buy_volume", "sum"),
                 sell_volume=("sell_volume", "sum"),
             )
             print("DAY", day, len(out), flush=True)
