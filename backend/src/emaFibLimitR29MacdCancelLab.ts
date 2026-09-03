@@ -67,9 +67,9 @@ function norm(v: number) {
   if (v > 1e14) return Math.floor(v / 1e3);
   return v;
 }
-async function fetchDay(d: string): Promise<Bar[]> {
+async function fetchDayOnce(d: string, attempt: number): Promise<Bar[]> {
   const fn = `${SYMBOL}-aggTrades-${d}.zip`,
-    r = await fetch(`${BASE}/${fn}`);
+    r = await fetch(`${BASE}/${fn}?r29_retry=${attempt}`);
   if (r.status === 404) return [];
   if (!r.ok || !r.body) throw new Error(`VISION_${r.status}:${d}`);
   const unzip = spawn("funzip", [], { stdio: ["pipe", "pipe", "inherit"] }),
@@ -77,6 +77,9 @@ async function fetchDay(d: string): Promise<Bar[]> {
       unzip.once("error", reject);
       unzip.once("close", resolve);
     });
+  // funzip can reject a truncated CDN response before fetch finishes piping it.
+  // Consume EPIPE here; the non-zero close code below turns it into a retry.
+  unzip.stdin.on("error", () => {});
   Readable.fromWeb(r.body as never).pipe(unzip.stdin);
   const lines = readline.createInterface({
     input: unzip.stdout,
@@ -116,6 +119,18 @@ async function fetchDay(d: string): Promise<Bar[]> {
   const code = await closed;
   if (code !== 0) throw new Error(`UNZIP_${code}:${d}`);
   return [...m.values()].sort((a, b) => a.time - b.time);
+}
+async function fetchDay(d: string): Promise<Bar[]> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      return await fetchDayOnce(d, attempt);
+    } catch (error) {
+      lastError = error;
+      console.warn("DAY_RETRY", d, attempt, String(error));
+    }
+  }
+  throw lastError;
 }
 async function mapLimit<T, R>(
   xs: T[],
