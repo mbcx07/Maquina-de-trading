@@ -1,0 +1,26 @@
+name: XAU 100-Confluence R18 Lab
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - 'backend/src/xau100ConfluenceLabR18.ts'
+      - '.github/workflows/xau-100-confluence-r18.yml'
+
+jobs:
+  confluence-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Run 100-strategy blind confluence backtest
+        run: npx tsx src/xau100ConfluenceLabR18.ts
