@@ -1,0 +1,27 @@
+name: R18 Consensus100 30s Backtest
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - 'backend/src/consensus100R18.ts'
+      - 'backend/src/consensus100BacktestR18.ts'
+      - '.github/workflows/r18-consensus100-backtest.yml'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Run exact R18 30s consensus backtest
+        run: npx tsx src/consensus100BacktestR18.ts
