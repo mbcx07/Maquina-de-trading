@@ -1,4 +1,4 @@
-name: R40 high win-rate loss avoidance
+name: R40 high win-rate loss avoidance v1
 on:
   push:
     branches: [feature/v34-dual-market-engine]
