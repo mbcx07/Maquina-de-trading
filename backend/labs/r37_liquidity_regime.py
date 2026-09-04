@@ -42,10 +42,15 @@ def make_signals(b):
 
 def simulate(b,f,cfg):
     engine,lookback,tf,regime,vol_min,flow_min,reward,risk=cfg
-    side=f[lookback][engine]; idx=np.flatnonzero(side)
-    ok=(f["vol"][idx]>=vol_min)&(f["flow"][idx]*side[idx]>=flow_min)&(f["trends"][tf][idx]==side[idx])
-    if regime=="trend": ok&=(f["efficiency"][tf][idx]>=.28)&(f["emaBias"][idx]==side[idx])
-    else: ok&=f["efficiency"][tf][idx]<.35
+    if engine=="both":
+        side=np.where(f[lookback]["retest"]!=0,f[lookback]["retest"],f[lookback]["sweep"])
+    else: side=f[lookback][engine]
+    idx=np.flatnonzero(side)
+    ok=(f["vol"][idx]>=vol_min)&(f["flow"][idx]*side[idx]>=flow_min)
+    if regime=="trend":
+        ok&=(f["trends"][tf][idx]==side[idx])&(f["efficiency"][tf][idx]>=.28)&(f["emaBias"][idx]==side[idx])
+    elif regime=="range":
+        ok&=f["efficiency"][tf][idx]<.35
     idx=idx[ok]; op,hi,lo,cl=(b[x].to_numpy(float) for x in ("open","high","low","close")); out=[]
     for signal in idx:
         eb=signal+1
@@ -76,7 +81,7 @@ def qualifies(x): return x["tradesPerDay"]>=MIN_TPD and x["winRate"]>=65 and x["
 
 def main():
     data={s:load_symbol(s) for s in SYMBOLS}; feat={s:make_signals(b) for s,b in data.items()}
-    configs=list(product(("sweep","retest"),(20,40,80),("5min","15min"),("trend","range"),(.7,1.0),(0,.1),(.6,.8,1.0),(.25,.4)))
+    configs=list(product(("sweep","retest","both"),(20,40,80),("5min","15min"),("trend","range","all"),(.5,.7,1.0),(-.1,0,.1),(.6,.8,1.0),(.25,.4)))
     rows=[]
     for n,cfg in enumerate(configs,1):
         pool={"train":[],"validationA":[],"validationB":[]}; per={}
@@ -91,12 +96,15 @@ def main():
             days=np.mean([len(b) for b in data.values()])/BARS_PER_DAY*(2/3 if name=="train" else 1/6)
             combined[name]=stats(rr,days)
         va,vb=combined["validationA"],combined["validationB"]
-        score=min(va["winRate"],vb["winRate"])+20*min(va["pf"],vb["pf"])+min(va["tradesPerDay"],vb["tradesPerDay"])
+        floor_tpd=min(combined[x]["tradesPerDay"] for x in combined)
+        score=min(va["winRate"],vb["winRate"])+20*min(va["pf"],vb["pf"])+min(floor_tpd,10)*3-50*max(0,10-floor_tpd)
         conf={"engine":cfg[0],"lookback":cfg[1],"trendFrame":cfg[2],"regime":cfg[3],"volumeMin":cfg[4],"flowMin":cfg[5],"tpPct":cfg[6],"maxSlPct":cfg[7]}
         rows.append({"config":conf,"combined":combined,"perSymbol":per,"qualified":all(qualifies(combined[x]) for x in combined),"score":score})
         if n%100==0: print("R37_CONFIG",n,"/",len(configs),flush=True)
-    rows.sort(key=lambda x:x["score"],reverse=True); best=rows[0]
-    output={"mode":"DEVELOPMENT_ONLY_BLIND_LOCKED","symbols":SYMBOLS,"costPct":COST,"testedConfigurations":len(rows),"qualifiedConfigurations":sum(r["qualified"] for r in rows),"best":best,"blindOpened":False,"survived":False,"requirements":{"winRateMin":65,"tradesPerDayMin":10,"pfMin":1.2,"positiveReturn":True}}
+    rows.sort(key=lambda x:x["score"],reverse=True)
+    eligible=[r for r in rows if min(r["combined"][x]["tradesPerDay"] for x in r["combined"])>=10]
+    best=eligible[0] if eligible else rows[0]
+    output={"mode":"DEVELOPMENT_ONLY_BLIND_LOCKED","symbols":SYMBOLS,"costPct":COST,"testedConfigurations":len(rows),"frequencyEligibleConfigurations":len(eligible),"qualifiedConfigurations":sum(r["qualified"] for r in rows),"best":best,"blindOpened":False,"survived":False,"requirements":{"winRateMin":65,"tradesPerDayMin":10,"pfMin":1.2,"positiveReturn":True}}
     path=os.path.join(os.path.dirname(__file__),"..","artifacts","r37-liquidity-regime.json")
     with open(path,"w") as fh: json.dump(output,fh,indent=2)
     print("R37_RESULT",json.dumps(output),flush=True)
