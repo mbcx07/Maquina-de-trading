@@ -1,0 +1,32 @@
+name: R39 optimized Monster XAU Crude
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths: [backend/labs/r39_monster_optimized.py, .github/workflows/r39-monster-optimized.yml]
+  workflow_dispatch:
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults: {run: {working-directory: backend}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            backend/artifacts/r35-daily
+            backend/artifacts/r35-XAUUSDT-30s-2026-09-01-56d.pkl
+            backend/artifacts/r35-CLUSDT-30s-2026-09-01-56d.pkl
+          key: r37-xau-cl-30-second-2026-09-01-56d-v1
+      - run: pip install numpy pandas scikit-learn
+      - name: Run dynamic targets stops sessions and intelligent exits
+        env: {R35_END_DATE: "2026-09-01", R35_DAYS: "56"}
+        run: python labs/r39_monster_optimized.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r39-monster-optimized
+          path: backend/artifacts/r39-monster-optimized.json
+          if-no-files-found: warn
