@@ -78,7 +78,14 @@ def main():
             rows.append({"config":cfg,"combined":total,"perSymbol":per,"qualified":all(qualify(total[x]) for x in total),"score":score})
         print("R39_SIGNAL_SET",signal_cfg.index((frame,min_osc,vol,impulse,session))+1,"/",len(signal_cfg),flush=True)
     rows.sort(key=lambda r:r["score"],reverse=True); eligible=[r for r in rows if min(r["combined"][x]["tradesPerDay"] for x in r["combined"])>=10]; high=[r for r in rows if min(r["combined"][x]["winRate"] for x in r["combined"])>=65]
-    output={"mode":"DEVELOPMENT_ONLY_BLIND_LOCKED","symbols":list(SYMBOLS),"costPct":COST,"testedConfigurations":tested,"frequencyEligible":len(eligible),"stableWinRate65":len(high),"qualified":sum(r["qualified"] for r in rows),"bestFrequencyEligible":eligible[0] if eligible else None,"bestHighWinRate":high[0] if high else None,"bestOverall":rows[0],"blindOpened":False,"survived":False}
+    high_best=high[0] if high else None
+    exit_comparison=[]
+    if high_best:
+        reference=high_best["config"]
+        fixed=("timeframe","minOscillators","volumeRatio","impulseAtr","session","tpPct","stop","breakEven")
+        exit_comparison=[r for r in rows if all(r["config"][key]==reference[key] for key in fixed)]
+        exit_comparison.sort(key=lambda r: EXITS.index(r["config"]["trendExit"]))
+    output={"mode":"DEVELOPMENT_ONLY_BLIND_LOCKED","symbols":list(SYMBOLS),"costPct":COST,"testedConfigurations":tested,"frequencyEligible":len(eligible),"stableWinRate65":len(high),"qualified":sum(r["qualified"] for r in rows),"bestFrequencyEligible":eligible[0] if eligible else None,"bestHighWinRate":high_best,"highWinRateExitComparison":exit_comparison,"bestOverall":rows[0],"blindOpened":False,"survived":False}
     path=os.path.join(os.path.dirname(__file__),"..","artifacts","r39-monster-optimized.json")
     with open(path,"w") as f: json.dump(output,f,indent=2)
     print("R39_RESULT",json.dumps(output),flush=True)
