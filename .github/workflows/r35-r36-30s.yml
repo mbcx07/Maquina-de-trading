@@ -27,6 +27,7 @@ jobs:
             backend/artifacts/r35-daily
             backend/artifacts/r35-XAUUSDT-30s-2026-09-01-56d.pkl
           key: r35-xau-30-second-2026-09-01-56d-v1
+          save-always: true
       - run: pip install numpy pandas scikit-learn
       - name: Run causal 30-second entry research
         env:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import io
 import os
+import tempfile
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -71,7 +72,14 @@ def download_day(day: str) -> pd.DataFrame:
     daily_dir.mkdir(exist_ok=True)
     daily_path = daily_dir / f"XAUUSDT-30s-{day}.pkl"
     if daily_path.exists():
-        return pd.read_pickle(daily_path)
+        try:
+            cached = pd.read_pickle(daily_path)
+            if not cached.empty and set(
+                ["open", "high", "low", "close", "volume", "buy_volume", "sell_volume"]
+            ).issubset(cached.columns):
+                return cached
+        except Exception:
+            daily_path.unlink(missing_ok=True)
     url = (
         "https://data.binance.vision/data/futures/um/daily/aggTrades/"
         f"XAUUSDT/XAUUSDT-aggTrades-{day}.zip"
@@ -87,12 +95,27 @@ def download_day(day: str) -> pd.DataFrame:
             with zipfile.ZipFile(io.BytesIO(payload)) as archive:
                 if not archive.namelist():
                     raise ValueError("empty Binance Vision ZIP")
-                frame = pd.read_csv(
-                    archive.open(archive.namelist()[0]),
-                    header=None,
-                    usecols=[1, 2, 5, 6],
-                    names=["price", "qty", "time", "maker"],
-                )
+                # Binance added a header to newer aggTrades archives. Reading
+                # positional usecols together with four replacement names is
+                # rejected by pandas 3, so parse the schema first and then
+                # select the four fields needed by this laboratory.
+                raw = pd.read_csv(archive.open(archive.namelist()[0]))
+                normalized = {str(column).strip().lower(): column for column in raw.columns}
+                named = {
+                    "price": normalized.get("price"),
+                    "qty": normalized.get("quantity", normalized.get("qty")),
+                    "time": normalized.get("transact_time", normalized.get("time")),
+                    "maker": normalized.get("is_buyer_maker", normalized.get("maker")),
+                }
+                if all(column is not None for column in named.values()):
+                    frame = raw[[named[key] for key in ("price", "qty", "time", "maker")]].copy()
+                    frame.columns = ["price", "qty", "time", "maker"]
+                else:
+                    raw = pd.read_csv(archive.open(archive.namelist()[0]), header=None)
+                    if raw.shape[1] < 7:
+                        raise ValueError(f"unexpected aggTrades schema: {raw.shape[1]} columns")
+                    frame = raw.iloc[:, [1, 2, 5, 6]].copy()
+                    frame.columns = ["price", "qty", "time", "maker"]
             for column in ["price", "qty", "time"]:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
             frame = frame.dropna(subset=["price", "qty", "time"])
@@ -116,7 +139,15 @@ def download_day(day: str) -> pd.DataFrame:
                 buy_volume=("buy_volume", "sum"),
                 sell_volume=("sell_volume", "sum"),
             )
-            result.to_pickle(daily_path)
+            if len(result) < 100:
+                raise ValueError(f"incomplete 30-second day: only {len(result)} bars")
+            with tempfile.NamedTemporaryFile(dir=daily_dir, suffix=".pkl", delete=False) as temp:
+                temp_path = Path(temp.name)
+            try:
+                result.to_pickle(temp_path)
+                temp_path.replace(daily_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
             print("R35_DAY", day, len(result), flush=True)
             return result
         except Exception as error:
