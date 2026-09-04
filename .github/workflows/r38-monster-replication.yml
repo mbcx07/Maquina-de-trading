@@ -1,0 +1,32 @@
+name: R38 Monster replication XAU Crude
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths: [backend/labs/r38_monster_replication.py, .github/workflows/r38-monster-replication.yml]
+  workflow_dispatch:
+jobs:
+  replicate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults: {run: {working-directory: backend}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            backend/artifacts/r35-daily
+            backend/artifacts/r35-XAUUSDT-30s-2026-09-01-56d.pkl
+            backend/artifacts/r35-CLUSDT-30s-2026-09-01-56d.pkl
+          key: r37-xau-cl-30-second-2026-09-01-56d-v1
+      - run: pip install numpy pandas scikit-learn
+      - name: Test literal corrected and intelligent exits
+        env: {R35_END_DATE: "2026-09-01", R35_DAYS: "56"}
+        run: python labs/r38_monster_replication.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r38-monster-replication
+          path: backend/artifacts/r38-monster-replication.json
+          if-no-files-found: warn
