@@ -6,7 +6,7 @@ import os
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -65,7 +65,8 @@ def download_day(day: str) -> pd.DataFrame:
 def load_bars() -> pd.DataFrame:
     if CACHE.exists():
         return pd.read_pickle(CACHE)
-    end = datetime.now(timezone.utc).date() - timedelta(days=2)
+    fixed_end = os.getenv("R32_END_DATE")
+    end = date.fromisoformat(fixed_end) if fixed_end else datetime.now(timezone.utc).date() - timedelta(days=2)
     dates = [(end - timedelta(days=DAYS - i)).isoformat() for i in range(DAYS)]
     frames = []
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -141,6 +142,7 @@ def features_and_candidates(b30: pd.DataFrame):
     extra_event = (rsi.lt(30)|rsi.gt(70)|z20.abs().gt(1.5)|x.flow.abs().gt(.35)|x.volume_ratio.gt(1.5)|x.body.abs().gt(.6))
     candidate = (direction != 0) & (((cross+bounce+pull150+retest)>0)|extra_event) & (x.volume_ratio >= .7)
     valid = candidate & x.replace([np.inf,-np.inf],np.nan).notna().all(axis=1)
+    valid.iloc[-1] = False
     idx = np.flatnonzero(valid.to_numpy())
     names = list(x.columns)
     direct = x.iloc[idx].to_numpy(dtype=np.float32)

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import numpy as np
 from sklearn.ensemble import HistGradientBoostingClassifier
 
 import r32_ml_research as core
 
-SYMBOLS = ["XAUUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT"]
+SYMBOLS = os.getenv(
+    "R33_SYMBOLS", "XAUUSDT,BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT"
+).split(",")
 CONFIGS = [(tp, sl, h) for tp, sl in [(.40,.25),(.50,.20),(.60,.15),(.80,.10)] for h in [30,60,120]]
 
 
