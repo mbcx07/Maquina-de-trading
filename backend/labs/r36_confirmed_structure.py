@@ -40,7 +40,10 @@ def confirmed_levels(bars: pd.DataFrame, depth: int = 6):
         ).dropna()
         high = higher.high.to_numpy()
         low = higher.low.to_numpy()
-        timestamps = higher.index.view("int64")
+        # pandas 3 preserves the millisecond resolution produced by the raw
+        # trade feed. Timedelta.value is nanoseconds, so normalize explicitly
+        # before comparing pivot confirmation times.
+        timestamps = pd.DatetimeIndex(higher.index).as_unit("ns").asi8
         frame_ns = pd.Timedelta(frame).value
         for i in range(2, len(higher) - 2):
             known_at = int(timestamps[i + 2] + frame_ns)
@@ -53,7 +56,10 @@ def confirmed_levels(bars: pd.DataFrame, depth: int = 6):
     above = np.full((len(bars), depth), np.nan, dtype=np.float64)
     active = []
     cursor = 0
-    close_ns = bars.index.view("int64") + pd.Timedelta("30s").value
+    close_ns = (
+        pd.DatetimeIndex(bars.index).as_unit("ns").asi8
+        + pd.Timedelta("30s").value
+    )
     prices = bars.close.to_numpy()
     for i, (known, price) in enumerate(zip(close_ns, prices)):
         while cursor < len(events) and events[cursor][0] <= known:
