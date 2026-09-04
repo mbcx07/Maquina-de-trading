@@ -1,0 +1,32 @@
+name: R40 high win-rate loss avoidance
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths: [backend/labs/r40_loss_avoidance.py, .github/workflows/r40-loss-avoidance.yml]
+  workflow_dispatch:
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults: {run: {working-directory: backend}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            backend/artifacts/r35-daily
+            backend/artifacts/r35-XAUUSDT-30s-2026-09-01-56d.pkl
+            backend/artifacts/r35-CLUSDT-30s-2026-09-01-56d.pkl
+          key: r37-xau-cl-30-second-2026-09-01-56d-v1
+      - run: pip install numpy pandas scikit-learn
+      - name: Analyze losing paths and causal protective exits
+        env: {R35_END_DATE: "2026-09-01", R35_DAYS: "56"}
+        run: python labs/r40_loss_avoidance.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r40-loss-avoidance
+          path: backend/artifacts/r40-loss-avoidance.json
+          if-no-files-found: warn
