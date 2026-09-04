@@ -1,0 +1,46 @@
+name: R33-R34 robust portfolio research
+
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths:
+      - backend/labs/r32_ml_research.py
+      - backend/labs/r33_multi_market.py
+      - backend/labs/r34_pooled_robust.py
+      - .github/workflows/r33-r34-portfolio.yml
+  workflow_dispatch:
+
+jobs:
+  portfolio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: backend/artifacts/r33-*-1m-56d.pkl
+          key: r33-one-minute-six-markets-2026-09-01-v1
+      - run: pip install numpy pandas scikit-learn
+      - name: Run independently selected markets
+        env:
+          R32_DAYS: "56"
+        run: python labs/r33_multi_market.py
+      - name: Run pooled robust development validation
+        env:
+          R32_DAYS: "56"
+          R34_MODE: develop
+        run: python labs/r34_pooled_robust.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r33-r34-portfolio-research
+          path: |
+            backend/artifacts/r33-multi-market.json
+            backend/artifacts/r34-pooled-development.json
+          if-no-files-found: warn

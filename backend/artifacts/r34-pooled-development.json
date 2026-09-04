@@ -1,0 +1,721 @@
+{
+  "mode": "develop",
+  "symbols": [
+    "XAUUSDT",
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "BNBUSDT"
+  ],
+  "costPct": 0.145,
+  "exposurePct": 0.1,
+  "selection": "POOLED_TRAIN_TWO_STABLE_VALIDATION_WINDOWS_BLIND_STILL_LOCKED",
+  "sameBarDirectionFix": "highest_probability_side",
+  "purgedBoundaries": true,
+  "requirements": {
+    "winRateMin": 65,
+    "tradesPerDayMin": 10.0,
+    "pfMin": 1.2,
+    "positiveReturn": true
+  },
+  "testedConfigurations": 108,
+  "qualifiedConfigurations": 0,
+  "best": {
+    "tp": 0.4,
+    "sl": 0.25,
+    "horizon": 120,
+    "filter": "trend",
+    "threshold": 0.581334677264183,
+    "train": {
+      "trades": 422,
+      "winRate": 54.2654028436019,
+      "pf": 0.8014425347796559,
+      "returnPct": -1.401973884871012,
+      "ddPct": 1.492309520334431,
+      "tradesPerDay": 11.303571428571427
+    },
+    "validationA": {
+      "trades": 114,
+      "winRate": 35.08771929824561,
+      "pf": 0.3571252777744415,
+      "returnPct": -1.7479744444244432,
+      "ddPct": 1.7479744444244432,
+      "tradesPerDay": 12.214285714285714
+    },
+    "validationB": {
+      "trades": 180,
+      "winRate": 42.22222222222222,
+      "pf": 0.468657269926818,
+      "returnPct": -2.14872456880137,
+      "ddPct": 2.2073725785955185,
+      "tradesPerDay": 19.285714285714285
+    },
+    "qualified": false,
+    "score": -18.132322363020933
+  },
+  "top20": [
+    {
+      "tp": 0.4,
+      "sl": 0.25,
+      "horizon": 120,
+      "filter": "trend",
+      "threshold": 0.581334677264183,
+      "train": {
+        "trades": 422,
+        "winRate": 54.2654028436019,
+        "pf": 0.8014425347796559,
+        "returnPct": -1.401973884871012,
+        "ddPct": 1.492309520334431,
+        "tradesPerDay": 11.303571428571427
+      },
+      "validationA": {
+        "trades": 114,
+        "winRate": 35.08771929824561,
+        "pf": 0.3571252777744415,
+        "returnPct": -1.7479744444244432,
+        "ddPct": 1.7479744444244432,
+        "tradesPerDay": 12.214285714285714
+      },
+      "validationB": {
+        "trades": 180,
+        "winRate": 42.22222222222222,
+        "pf": 0.468657269926818,
+        "returnPct": -2.14872456880137,
+        "ddPct": 2.2073725785955185,
+        "tradesPerDay": 19.285714285714285
+      },
+      "qualified": false,
+      "score": -18.132322363020933
+    },
+    {
+      "tp": 0.6,
+      "sl": 0.2,
+      "horizon": 120,
+      "filter": "trend",
+      "threshold": 0.581334677264183,
+      "train": {
+        "trades": 379,
+        "winRate": 41.16094986807388,
+        "pf": 0.8530533864899211,
+        "returnPct": -1.0649899681409352,
+        "ddPct": 1.3213797907684257,
+        "tradesPerDay": 10.151785714285714
+      },
+      "validationA": {
+        "trades": 115,
+        "winRate": 22.608695652173914,
+        "pf": 0.38692623672218857,
+        "returnPct": -1.7965933803327516,
+        "ddPct": 1.818163744733397,
+        "tradesPerDay": 12.321428571428571
+      },
+      "validationB": {
+        "trades": 152,
+        "winRate": 29.605263157894733,
+        "pf": 0.5342998316983129,
+        "returnPct": -1.6720132666976184,
+        "ddPct": 1.7814816469913242,
+        "tradesPerDay": 16.285714285714285
+      },
+      "qualified": false,
+      "score": -21.83129163796489
+    },
+    {
+      "tp": 0.5,
+      "sl": 0.2,
+      "horizon": 120,
+      "filter": "trend",
+      "threshold": 0.581334677264183,
+      "train": {
+        "trades": 402,
+        "winRate": 47.01492537313433,
+        "pf": 0.9017901688115879,
+        "returnPct": -0.6856261867871893,
+        "ddPct": 1.1583397868267837,
+        "tradesPerDay": 10.767857142857142
+      },
+      "validationA": {
+        "trades": 121,
+        "winRate": 26.446280991735538,
+        "pf": 0.3704191970204176,
+        "returnPct": -1.8641128731303525,
+        "ddPct": 1.8660515237636586,
+        "tradesPerDay": 12.964285714285714
+      },
+      "validationB": {
+        "trades": 166,
+        "winRate": 34.33734939759036,
+        "pf": 0.5226453831613073,
+        "returnPct": -1.7566269440491737,
+        "ddPct": 1.7973111055642335,
+        "tradesPerDay": 17.785714285714285
+      },
+      "qualified": false,
+      "score": -22.3854831594831
+    },
+    {
+      "tp": 0.45,
+      "sl": 0.2,
+      "horizon": 120,
+      "filter": "trend",
+      "threshold": 0.581334677264183,
+      "train": {
+        "trades": 413,
+        "winRate": 47.45762711864407,
+        "pf": 0.8119351974208963,
+        "returnPct": -1.325572314225667,
+        "ddPct": 1.4456683116854285,
+        "tradesPerDay": 11.0625
+      },
+      "validationA": {
+        "trades": 121,
+        "winRate": 28.09917355371901,
+        "pf": 0.34697005872414227,
+        "returnPct": -1.888591055597857,
+        "ddPct": 1.8885910555978567,
+        "tradesPerDay": 12.964285714285714
+      },
+      "validationB": {
+        "trades": 184,
+        "winRate": 36.41304347826087,
+        "pf": 0.5003108032882817,
+        "returnPct": -1.9733065333821713,
+        "ddPct": 1.9914040612738688,
+        "tradesPerDay": 19.71428571428571
+      },
+      "qualified": false,
+      "score": -22.738393585775427
+    },
+    {
+      "tp": 0.4,
+      "sl": 0.2,
+      "horizon": 120,
+      "filter": "trend",
+      "threshold": 0.581334677264183,
+      "train": {
+        "trades": 440,
+        "winRate": 49.54545454545455,
+        "pf": 0.7447437534011495,
+        "returnPct": -1.8390110470190422,
+        "ddPct": 1.8463515876619194,
+        "tradesPerDay": 11.785714285714285
+      },
+      "validationA": {
+        "trades": 121,
+        "winRate": 29.75206611570248,
+        "pf": 0.31536709551803527,
+        "returnPct": -1.932680663555999,
+        "ddPct": 1.9326806635559988,
+        "tradesPerDay": 12.964285714285714
+      },
+      "validationB": {
+        "trades": 197,
+        "winRate": 40.10152284263959,
+        "pf": 0.4912265218746856,
+        "returnPct": -2.0424027778020815,
+        "ddPct": 2.090843208523566,
+        "tradesPerDay": 21.107142857142854
+      },
+      "qualified": false,
+      "score": -25.02625789042854
+    },
+    {
+      "tp": 0.4,
+      "sl": 0.2,
+      "horizon": 60,
+      "filter": "trend",
+      "threshold": 0.6116405128497485,
+      "train": {
+        "trades": 430,
+        "winRate": 45.81395348837209,
+        "pf": 0.6421185810416342,
+        "returnPct": -2.5463826518673187,
+        "ddPct": 2.893426440420333,
+        "tradesPerDay": 11.517857142857142
+      },
+      "validationA": {
+        "trades": 94,
+        "winRate": 36.17021276595745,
+        "pf": 0.42662817758667954,
+        "returnPct": -1.1079335291356642,
+        "ddPct": 1.1998384586674433,
+        "tradesPerDay": 10.071428571428571
+      },
+      "validationB": {
+        "trades": 269,
+        "winRate": 35.687732342007436,
+        "pf": 0.4048905882017304,
+        "returnPct": -3.4122586823341265,
+        "ddPct": 3.436882277353395,
+        "tradesPerDay": 28.82142857142857
+      },
+      "qualified": false,
+      "score": -28.753732075954193
+    },
+    {
+      "tp": 0.4,
+      "sl": 0.15,
+      "horizon": 120,
+      "filter": "trend",
+      "threshold": 0.581334677264183,
+      "train": {
+        "trades": 477,
+        "winRate": 42.34800838574424,
+        "pf": 0.6410917942645622,
+        "returnPct": -2.789817415516737,
+        "ddPct": 2.806809770755857,
+        "tradesPerDay": 12.776785714285714
+      },
+      "validationA": {
+        "trades": 129,
+        "winRate": 26.356589147286826,
+        "pf": 0.2996516130980904,
+        "returnPct": -1.913080859836029,
+        "ddPct": 1.9130808598360292,
+        "tradesPerDay": 13.821428571428571
+      },
+      "validationB": {
+        "trades": 225,
+        "winRate": 32.44444444444444,
+        "pf": 0.41000452572128077,
+        "returnPct": -2.6117240855070776,
+        "ddPct": 2.6744875801774555,
+        "tradesPerDay": 24.107142857142854
+      },
+      "qualified": false,
+      "score": -34.42543299145778
+    },
+    {
+      "tp": 0.35,
+      "sl": 0.15,
+      "horizon": 120,
+      "filter": "trend",
+      "threshold": 0.581334677264183,
+      "train": {
+        "trades": 495,
+        "winRate": 45.85858585858586,
+        "pf": 0.5994843993110585,
+        "returnPct": -3.0312411767707204,
+        "ddPct": 3.0312411767707204,
+        "tradesPerDay": 13.258928571428571
+      },
+      "validationA": {
+        "trades": 133,
+        "winRate": 28.57142857142857,
+        "pf": 0.27733201287319753,
+        "returnPct": -1.973402118263479,
+        "ddPct": 1.973402118263479,
+        "tradesPerDay": 14.249999999999998
+      },
+      "validationB": {
+        "trades": 227,
+        "winRate": 35.24229074889868,
+        "pf": 0.37818517237402693,
+        "returnPct": -2.661255364785987,
+        "ddPct": 2.7633826005254747,
+        "tradesPerDay": 24.32142857142857
+      },
+      "qualified": false,
+      "score": -35.5696466496216
+    },
+    {
+      "tp": 0.4,
+      "sl": 0.15,
+      "horizon": 60,
+      "filter": "trend",
+      "threshold": 0.6116405128497485,
+      "train": {
+        "trades": 460,
+        "winRate": 41.08695652173913,
+        "pf": 0.5911605976635825,
+        "returnPct": -3.0429587151399318,
+        "ddPct": 3.369910666890932,
+        "tradesPerDay": 12.321428571428571
+      },
+      "validationA": {
+        "trades": 105,
+        "winRate": 29.523809523809526,
+        "pf": 0.3596836022465341,
+        "returnPct": -1.356588180766181,
+        "ddPct": 1.4201605686521788,
+        "tradesPerDay": 11.25
+      },
+      "validationB": {
+        "trades": 296,
+        "winRate": 29.72972972972973,
+        "pf": 0.360962356203882,
+        "returnPct": -3.786407866102209,
+        "ddPct": 3.8109360774024656,
+        "tradesPerDay": 31.71428571428571
+      },
+      "qualified": false,
+      "score": -45.28152882049567
+    },
+    {
+      "tp": 0.35,
+      "sl": 0.1,
+      "horizon": 120,
+      "filter": "trend",
+      "threshold": 0.581334677264183,
+      "train": {
+        "trades": 583,
+        "winRate": 36.706689536878216,
+        "pf": 0.48496436853060954,
+        "returnPct": -4.536721753916638,
+        "ddPct": 4.536721753916638,
+        "tradesPerDay": 15.616071428571427
+      },
+      "validationA": {
+        "trades": 143,
+        "winRate": 23.076923076923077,
+        "pf": 0.24826522827500175,
+        "returnPct": -1.9855329411921616,
+        "ddPct": 1.9855329411921616,
+        "tradesPerDay": 15.321428571428571
+      },
+      "validationB": {
+        "trades": 265,
+        "winRate": 27.169811320754718,
+        "pf": 0.3121497303584732,
+        "returnPct": -3.2008822647174213,
+        "ddPct": 3.2647207302705255,
+        "tradesPerDay": 28.392857142857142
+      },
+      "qualified": false,
+      "score": -47.92764980967125
+    },
+    {
+      "tp": 0.6,
+      "sl": 0.2,
+      "horizon": 30,
+      "filter": "trend",
+      "threshold": 0.6384992131571058,
+      "train": {
+        "trades": 529,
+        "winRate": 34.78260869565217,
+        "pf": 0.5807715790238864,
+        "returnPct": -4.401106516441089,
+        "ddPct": 4.463308809913922,
+        "tradesPerDay": 14.169642857142856
+      },
+      "validationA": {
+        "trades": 251,
+        "winRate": 26.294820717131472,
+        "pf": 0.4456706576333441,
+        "returnPct": -3.324374468689669,
+        "ddPct": 3.324374468689669,
+        "tradesPerDay": 26.892857142857142
+      },
+      "validationB": {
+        "trades": 377,
+        "winRate": 28.647214854111407,
+        "pf": 0.5135789175867638,
+        "returnPct": -4.170687448743337,
+        "ddPct": 4.2142699559134,
+        "tradesPerDay": 40.39285714285714
+      },
+      "qualified": false,
+      "score": -51.18444028757889
+    },
+    {
+      "tp": 0.3,
+      "sl": 0.1,
+      "horizon": 120,
+      "filter": "trend",
+      "threshold": 0.581334677264183,
+      "train": {
+        "trades": 626,
+        "winRate": 38.65814696485623,
+        "pf": 0.3986849746012274,
+        "returnPct": -5.485072722605423,
+        "ddPct": 5.485072722605423,
+        "tradesPerDay": 16.767857142857142
+      },
+      "validationA": {
+        "trades": 150,
+        "winRate": 24.666666666666668,
+        "pf": 0.20924400477190755,
+        "returnPct": -2.1443724381420424,
+        "ddPct": 2.1443724381420424,
+        "tradesPerDay": 16.07142857142857
+      },
+      "validationB": {
+        "trades": 279,
+        "winRate": 28.673835125448026,
+        "pf": 0.2543328889344757,
+        "returnPct": -3.570877981326319,
+        "ddPct": 3.610865771162807,
+        "tradesPerDay": 29.892857142857142
+      },
+      "qualified": false,
+      "score": -55.42241732042319
+    },
+    {
+      "tp": 0.35,
+      "sl": 0.15,
+      "horizon": 60,
+      "filter": "trend",
+      "threshold": 0.6116405128497485,
+      "train": {
+        "trades": 481,
+        "winRate": 43.45114345114345,
+        "pf": 0.5386342673358059,
+        "returnPct": -3.4582296693986905,
+        "ddPct": 3.7175373052630842,
+        "tradesPerDay": 12.883928571428571
+      },
+      "validationA": {
+        "trades": 112,
+        "winRate": 33.92857142857143,
+        "pf": 0.3566355130988341,
+        "returnPct": -1.3629802785307277,
+        "ddPct": 1.4034090243524844,
+        "tradesPerDay": 12.0
+      },
+      "validationB": {
+        "trades": 306,
+        "winRate": 30.718954248366014,
+        "pf": 0.3037037539894101,
+        "returnPct": -4.214564809648834,
+        "ddPct": 4.234196799304976,
+        "tradesPerDay": 32.785714285714285
+      },
+      "qualified": false,
+      "score": -57.27970834786146
+    },
+    {
+      "tp": 0.5,
+      "sl": 0.2,
+      "horizon": 30,
+      "filter": "trend",
+      "threshold": 0.6384992131571058,
+      "train": {
+        "trades": 570,
+        "winRate": 37.368421052631575,
+        "pf": 0.5781237087857602,
+        "returnPct": -4.596317677760936,
+        "ddPct": 4.648862178029599,
+        "tradesPerDay": 15.267857142857142
+      },
+      "validationA": {
+        "trades": 264,
+        "winRate": 29.166666666666668,
+        "pf": 0.42424531317200737,
+        "returnPct": -3.4901923739943186,
+        "ddPct": 3.4901923739943186,
+        "tradesPerDay": 28.285714285714285
+      },
+      "validationB": {
+        "trades": 421,
+        "winRate": 32.066508313539195,
+        "pf": 0.48180154031877764,
+        "returnPct": -4.782225150414874,
+        "ddPct": 4.825653598981479,
+        "tradesPerDay": 45.107142857142854
+      },
+      "qualified": false,
+      "score": -61.28092559001172
+    },
+    {
+      "tp": 0.35,
+      "sl": 0.15,
+      "horizon": 30,
+      "filter": "trend",
+      "threshold": 0.6453031412418482,
+      "train": {
+        "trades": 376,
+        "winRate": 41.48936170212766,
+        "pf": 0.5078807608084169,
+        "returnPct": -2.9691716208516965,
+        "ddPct": 3.0089420306683388,
+        "tradesPerDay": 10.071428571428571
+      },
+      "validationA": {
+        "trades": 147,
+        "winRate": 28.57142857142857,
+        "pf": 0.2764323869007298,
+        "returnPct": -2.182668938631039,
+        "ddPct": 2.182668938631039,
+        "tradesPerDay": 15.749999999999998
+      },
+      "validationB": {
+        "trades": 336,
+        "winRate": 32.142857142857146,
+        "pf": 0.33024165447497905,
+        "returnPct": -4.392025784237688,
+        "ddPct": 4.392025784237688,
+        "tradesPerDay": 36.0
+      },
+      "qualified": false,
+      "score": -64.29760098821305
+    },
+    {
+      "tp": 0.4,
+      "sl": 0.25,
+      "horizon": 30,
+      "filter": "trend",
+      "threshold": 0.6384992131571058,
+      "train": {
+        "trades": 572,
+        "winRate": 43.00699300699301,
+        "pf": 0.5338735118228021,
+        "returnPct": -5.010097901480989,
+        "ddPct": 5.115001435354332,
+        "tradesPerDay": 15.321428571428571
+      },
+      "validationA": {
+        "trades": 270,
+        "winRate": 36.2962962962963,
+        "pf": 0.3814503581791559,
+        "returnPct": -3.8593070840903323,
+        "ddPct": 3.8593070840903327,
+        "tradesPerDay": 28.928571428571427
+      },
+      "validationB": {
+        "trades": 430,
+        "winRate": 39.76744186046511,
+        "pf": 0.43332643061064885,
+        "returnPct": -5.362163174534302,
+        "ddPct": 5.386289670668276,
+        "tradesPerDay": 46.07142857142857
+      },
+      "qualified": false,
+      "score": -66.0424741509004
+    },
+    {
+      "tp": 0.5,
+      "sl": 0.2,
+      "horizon": 60,
+      "filter": "trend",
+      "threshold": 0.5994862909266279,
+      "train": {
+        "trades": 645,
+        "winRate": 40.62015503875969,
+        "pf": 0.664769441913469,
+        "returnPct": -3.9017333122069005,
+        "ddPct": 4.208713468630162,
+        "tradesPerDay": 17.27678571428571
+      },
+      "validationA": {
+        "trades": 178,
+        "winRate": 29.775280898876407,
+        "pf": 0.42936857444640825,
+        "returnPct": -2.31162145278752,
+        "ddPct": 2.3809432854964143,
+        "tradesPerDay": 19.07142857142857
+      },
+      "validationB": {
+        "trades": 413,
+        "winRate": 30.26634382566586,
+        "pf": 0.44975333501232523,
+        "returnPct": -5.152385110320068,
+        "ddPct": 5.152385110320068,
+        "tradesPerDay": 44.25
+      },
+      "qualified": false,
+      "score": -69.33492680517868
+    },
+    {
+      "tp": 0.6,
+      "sl": 0.2,
+      "horizon": 60,
+      "filter": "trend",
+      "threshold": 0.5994862909266279,
+      "train": {
+        "trades": 609,
+        "winRate": 38.095238095238095,
+        "pf": 0.6914688510733652,
+        "returnPct": -3.503346148299485,
+        "ddPct": 3.800639022839418,
+        "tradesPerDay": 16.3125
+      },
+      "validationA": {
+        "trades": 172,
+        "winRate": 27.906976744186046,
+        "pf": 0.4951721505440539,
+        "returnPct": -2.030986949412238,
+        "ddPct": 2.120077942075824,
+        "tradesPerDay": 18.428571428571427
+      },
+      "validationB": {
+        "trades": 389,
+        "winRate": 26.47814910025707,
+        "pf": 0.4609200320363172,
+        "returnPct": -5.039402679786136,
+        "ddPct": 5.039402679786136,
+        "tradesPerDay": 41.67857142857142
+      },
+      "qualified": false,
+      "score": -70.50920619114007
+    },
+    {
+      "tp": 0.45,
+      "sl": 0.2,
+      "horizon": 30,
+      "filter": "trend",
+      "threshold": 0.6384992131571058,
+      "train": {
+        "trades": 583,
+        "winRate": 38.76500857632933,
+        "pf": 0.5528082790639595,
+        "returnPct": -4.8757523472436475,
+        "ddPct": 4.9233908027179565,
+        "tradesPerDay": 15.616071428571427
+      },
+      "validationA": {
+        "trades": 274,
+        "winRate": 29.927007299270077,
+        "pf": 0.3797283037474628,
+        "returnPct": -3.8756207569452528,
+        "ddPct": 3.8756207569452528,
+        "tradesPerDay": 29.357142857142854
+      },
+      "validationB": {
+        "trades": 430,
+        "winRate": 33.25581395348837,
+        "pf": 0.4431735025523928,
+        "returnPct": -5.163289746945338,
+        "ddPct": 5.192206124077498,
+        "tradesPerDay": 46.07142857142857
+      },
+      "qualified": false,
+      "score": -70.55070161264389
+    },
+    {
+      "tp": 0.4,
+      "sl": 0.25,
+      "horizon": 60,
+      "filter": "trend",
+      "threshold": 0.5994862909266279,
+      "train": {
+        "trades": 656,
+        "winRate": 49.08536585365854,
+        "pf": 0.6627113377451392,
+        "returnPct": -3.79331989667331,
+        "ddPct": 3.9437302990410976,
+        "tradesPerDay": 17.57142857142857
+      },
+      "validationA": {
+        "trades": 182,
+        "winRate": 37.91208791208791,
+        "pf": 0.42033335100220787,
+        "returnPct": -2.3528378395396885,
+        "ddPct": 2.4274998377371446,
+        "tradesPerDay": 19.5
+      },
+      "validationB": {
+        "trades": 414,
+        "winRate": 38.164251207729464,
+        "pf": 0.4063707464563038,
+        "returnPct": -5.6055921181051644,
+        "ddPct": 5.6055921181051644,
+        "tradesPerDay": 44.357142857142854
+      },
+      "qualified": false,
+      "score": -71.27613791343614
+    }
+  ],
+  "blindOpened": false,
+  "survived": false
+}

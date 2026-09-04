@@ -1,0 +1,209 @@
+{
+  "symbols": [
+    "XAUUSDT",
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "BNBUSDT"
+  ],
+  "costPct": 0.145,
+  "selection": "TRAIN_VALIDATION_ONLY_TEST_BLIND",
+  "perSymbol": [
+    {
+      "symbol": "XAUUSDT",
+      "tp": 0.4,
+      "sl": 0.25,
+      "horizon": 120,
+      "threshold": 0.6927493707517919,
+      "train": {
+        "trades": 60,
+        "winRate": 60.0,
+        "pf": 1.0656720816872338,
+        "returnPct": 0.05494842423030377,
+        "ddPct": 0.16039758196852613,
+        "tradesPerDay": 2.142857142857143
+      },
+      "validation": {
+        "trades": 35,
+        "winRate": 45.714285714285715,
+        "pf": 0.49629051442262206,
+        "returnPct": -0.37142049191652404,
+        "ddPct": 0.4729768925557486,
+        "tradesPerDay": 2.5
+      },
+      "test": {
+        "trades": 33,
+        "winRate": 45.45454545454545,
+        "pf": 0.5947716052461106,
+        "returnPct": -0.2604364793605498,
+        "ddPct": 0.3291474949863024,
+        "tradesPerDay": 2.357142857142857
+      }
+    },
+    {
+      "symbol": "BTCUSDT",
+      "tp": 0.4,
+      "sl": 0.25,
+      "horizon": 30,
+      "threshold": 0.6512268496952497,
+      "train": {
+        "trades": 194,
+        "winRate": 45.876288659793815,
+        "pf": 0.5927173429438652,
+        "returnPct": -1.3286958183826556,
+        "ddPct": 1.3345878153355102,
+        "tradesPerDay": 6.928571428571429
+      },
+      "validation": {
+        "trades": 29,
+        "winRate": 37.93103448275862,
+        "pf": 0.43923066866342486,
+        "returnPct": -0.3146325264893619,
+        "ddPct": 0.3301684012682128,
+        "tradesPerDay": 2.0714285714285716
+      },
+      "test": {
+        "trades": 339,
+        "winRate": 34.80825958702065,
+        "pf": 0.3546927447093844,
+        "returnPct": -5.091018818482283,
+        "ddPct": 5.139403890808217,
+        "tradesPerDay": 24.214285714285715
+      }
+    },
+    {
+      "symbol": "ETHUSDT",
+      "tp": 0.4,
+      "sl": 0.25,
+      "horizon": 120,
+      "threshold": 0.6215525219264498,
+      "train": {
+        "trades": 49,
+        "winRate": 67.3469387755102,
+        "pf": 1.3050044253529571,
+        "returnPct": 0.17804693155579798,
+        "ddPct": 0.2398125805176209,
+        "tradesPerDay": 1.75
+      },
+      "validation": {
+        "trades": 44,
+        "winRate": 31.818181818181817,
+        "pf": 0.3207975469146841,
+        "returnPct": -0.4819270990534221,
+        "ddPct": 0.4819270990534221,
+        "tradesPerDay": 3.142857142857143
+      },
+      "test": {
+        "trades": 14,
+        "winRate": 57.14285714285714,
+        "pf": 1.2415106607778517,
+        "returnPct": 0.03963892875670183,
+        "ddPct": 0.0789843975000145,
+        "tradesPerDay": 1.0
+      }
+    },
+    {
+      "symbol": "SOLUSDT",
+      "tp": 0.4,
+      "sl": 0.25,
+      "horizon": 30,
+      "threshold": 0.6250273991178475,
+      "train": {
+        "trades": 205,
+        "winRate": 51.21951219512195,
+        "pf": 0.7552062070483434,
+        "returnPct": -0.8495434899536747,
+        "ddPct": 1.2948032165555508,
+        "tradesPerDay": 7.321428571428571
+      },
+      "validation": {
+        "trades": 36,
+        "winRate": 47.22222222222222,
+        "pf": 0.5935004706223184,
+        "returnPct": -0.2427551530527694,
+        "ddPct": 0.24724263916745315,
+        "tradesPerDay": 2.5714285714285716
+      },
+      "test": {
+        "trades": 533,
+        "winRate": 34.33395872420263,
+        "pf": 0.34008964222346116,
+        "returnPct": -8.50241463845471,
+        "ddPct": 8.523899261178201,
+        "tradesPerDay": 38.07142857142857
+      }
+    },
+    {
+      "symbol": "XRPUSDT",
+      "tp": 0.4,
+      "sl": 0.25,
+      "horizon": 120,
+      "threshold": 0.6188953430194806,
+      "train": {
+        "trades": 77,
+        "winRate": 62.33766233766234,
+        "pf": 1.0341750191882504,
+        "returnPct": 0.03877978807234683,
+        "ddPct": 0.19986437985103322,
+        "tradesPerDay": 2.75
+      },
+      "validation": {
+        "trades": 31,
+        "winRate": 38.70967741935484,
+        "pf": 0.3953618199365576,
+        "returnPct": -0.39895166323300657,
+        "ddPct": 0.44972877481421847,
+        "tradesPerDay": 2.2142857142857144
+      },
+      "test": {
+        "trades": 62,
+        "winRate": 40.32258064516129,
+        "pf": 0.4460290000219081,
+        "returnPct": -0.7890125388842932,
+        "ddPct": 0.8395907954841868,
+        "tradesPerDay": 4.428571428571429
+      }
+    },
+    {
+      "symbol": "BNBUSDT",
+      "tp": 0.4,
+      "sl": 0.25,
+      "horizon": 120,
+      "threshold": 0.6182628320902668,
+      "train": {
+        "trades": 90,
+        "winRate": 58.88888888888889,
+        "pf": 0.8613561106609567,
+        "returnPct": -0.18115043627666694,
+        "ddPct": 0.36013724624035826,
+        "tradesPerDay": 3.2142857142857144
+      },
+      "validation": {
+        "trades": 27,
+        "winRate": 44.44444444444444,
+        "pf": 0.5161787994111282,
+        "returnPct": -0.2254692718582163,
+        "ddPct": 0.22765353743383798,
+        "tradesPerDay": 1.9285714285714286
+      },
+      "test": {
+        "trades": 35,
+        "winRate": 37.142857142857146,
+        "pf": 0.38088909136666904,
+        "returnPct": -0.4938544760200614,
+        "ddPct": 0.5100523769808988,
+        "tradesPerDay": 2.5
+      }
+    }
+  ],
+  "portfolioTest": {
+    "trades": 1016,
+    "winRate": 35.62992125984252,
+    "pf": 0.36506415015281346,
+    "returnPct": -14.46060005627757,
+    "ddPct": 14.470424286915373,
+    "tradesPerDay": 72.57142857142857
+  },
+  "survived": false
+}
