@@ -1,0 +1,32 @@
+name: R45 walk-forward portfolio XAU Crude
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths: [backend/labs/r45_walkforward_portfolio.py, .github/workflows/r45-walkforward-portfolio.yml]
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults: {run: {working-directory: backend}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            backend/artifacts/r35-daily
+            backend/artifacts/r35-XAUUSDT-30s-2026-09-01-56d.pkl
+            backend/artifacts/r35-CLUSDT-30s-2026-09-01-56d.pkl
+          key: r37-xau-cl-30-second-2026-09-01-56d-v1
+      - run: pip install numpy pandas scikit-learn
+      - name: Test train-selected walk-forward portfolio
+        env: {R35_END_DATE: "2026-09-01", R35_DAYS: "56"}
+        run: python labs/r45_walkforward_portfolio.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r45-walkforward-portfolio
+          path: backend/artifacts/r45-walkforward-portfolio.json
+          if-no-files-found: warn
