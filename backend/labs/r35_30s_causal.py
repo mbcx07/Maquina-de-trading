@@ -31,7 +31,8 @@ ARTIFACTS = ROOT / "artifacts"
 ARTIFACTS.mkdir(exist_ok=True)
 DATA_END = date.fromisoformat(os.getenv("R35_END_DATE", "2026-09-01"))
 DATA_DAYS = int(os.getenv("R35_DAYS", "56"))
-CACHE = ARTIFACTS / f"r35-XAUUSDT-30s-{DATA_END.isoformat()}-{DATA_DAYS}d.pkl"
+SYMBOL = os.getenv("R35_SYMBOL", "XAUUSDT")
+CACHE = ARTIFACTS / f"r35-{SYMBOL}-30s-{DATA_END.isoformat()}-{DATA_DAYS}d.pkl"
 LEGACY_CACHE = ARTIFACTS / "r32-bars-56d.pkl"
 
 
@@ -70,7 +71,7 @@ def event_edge(raw: pd.Series) -> pd.Series:
 def download_day(day: str) -> pd.DataFrame:
     daily_dir = ARTIFACTS / "r35-daily"
     daily_dir.mkdir(exist_ok=True)
-    daily_path = daily_dir / f"XAUUSDT-30s-{day}.pkl"
+    daily_path = daily_dir / f"{SYMBOL}-30s-{day}.pkl"
     if daily_path.exists():
         try:
             cached = pd.read_pickle(daily_path)
@@ -82,7 +83,7 @@ def download_day(day: str) -> pd.DataFrame:
             daily_path.unlink(missing_ok=True)
     url = (
         "https://data.binance.vision/data/futures/um/daily/aggTrades/"
-        f"XAUUSDT/XAUUSDT-aggTrades-{day}.zip"
+        f"{SYMBOL}/{SYMBOL}-aggTrades-{day}.zip"
     )
     last_error = None
     for attempt in range(6):
@@ -163,6 +164,7 @@ def load_bars() -> pd.DataFrame:
         LEGACY_CACHE.exists()
         and DATA_END == date(2026, 9, 1)
         and DATA_DAYS == 56
+        and SYMBOL == "XAUUSDT"
     ):
         bars = pd.read_pickle(LEGACY_CACHE)
         bars.to_pickle(CACHE)
@@ -649,7 +651,7 @@ def main():
     best = results[0]
     output = {
         "mode": "DEVELOPMENT_ONLY_BLIND_LOCKED",
-        "symbol": "XAUUSDT",
+        "symbol": SYMBOL,
         "entryTimeframe": "30s",
         "entryExecution": "MARKET_NEXT_30S_OPEN",
         "entryEvents": ["EMA_8_14_CROSS", "EMA_REBOUND", "FIB_REBOUND", "STRUCTURE_RETEST"],

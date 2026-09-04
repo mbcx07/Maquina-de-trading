@@ -1,0 +1,36 @@
+name: R37 XAU and Crude liquidity regime
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths: [backend/labs/r35_30s_causal.py, backend/labs/r37_liquidity_regime.py, .github/workflows/r37-xau-crude.yml]
+  workflow_dispatch:
+jobs:
+  xau-crude:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            backend/artifacts/r35-daily
+            backend/artifacts/r35-XAUUSDT-30s-2026-09-01-56d.pkl
+            backend/artifacts/r35-CLUSDT-30s-2026-09-01-56d.pkl
+          key: r37-xau-cl-30-second-2026-09-01-56d-v1
+          restore-keys: r35-xau-30-second-2026-09-01-56d-
+          save-always: true
+      - run: pip install numpy pandas scikit-learn
+      - name: Run XAU and WTI liquidity-regime research
+        env: {R35_END_DATE: "2026-09-01", R35_DAYS: "56", R37_SYMBOLS: "XAUUSDT,CLUSDT"}
+        run: python labs/r37_liquidity_regime.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r37-xau-crude-liquidity-regime
+          path: backend/artifacts/r37-liquidity-regime.json
+          if-no-files-found: warn
