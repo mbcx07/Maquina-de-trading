@@ -1,0 +1,26 @@
+name: XAU R18 Monster vs 100 Confluence
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - 'backend/src/xauMonsterVs100ConfluenceR18.ts'
+      - '.github/workflows/xau-r18-compare.yml'
+
+jobs:
+  compare-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Compare AI Monster V6 vs 100-strategy confluence
+        run: npx tsx src/xauMonsterVs100ConfluenceR18.ts
