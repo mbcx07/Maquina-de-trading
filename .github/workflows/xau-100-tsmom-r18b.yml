@@ -1,0 +1,26 @@
+name: XAU 100 Strategy TSMOM R18b
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/v34-dual-market-engine
+    paths:
+      - 'backend/src/xau100StrategyTsmomLabR18b.ts'
+      - '.github/workflows/xau-100-tsmom-r18b.yml'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Run TSMOM anchored 100-strategy blind backtest
+        run: npx tsx src/xau100StrategyTsmomLabR18b.ts
