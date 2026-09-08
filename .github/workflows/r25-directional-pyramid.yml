@@ -1,0 +1,24 @@
+name: R25 Directional Pyramid Basket
+
+on:
+  push:
+    branches: [feature/v34-dual-market-engine]
+    paths:
+      - 'backend/src/pyramidBasketR25Lab.ts'
+      - '.github/workflows/r25-directional-pyramid.yml'
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npx tsx src/pyramidBasketR25Lab.ts
